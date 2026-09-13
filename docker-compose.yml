@@ -12,7 +12,7 @@
 #   podman run --rm -it --device /dev/kfd --device /dev/dri \
 #     --group-add keep-groups --ipc=host --ulimit memlock=-1:-1 \
 #     -v /path/to/halogen-models:/models:ro \
-#     -p 8731:8731 ghcr.io/peonist-ai/halogen-flash-server:0.6.3
+#     -p 8731:8731 ghcr.io/peonist-ai/halogen-flash-server:0.7.0
 #
 # ONE VOLUME IS ENOUGH. The weights repo ships the tokenizer inside it, and
 # both services below read it from there. Set HALOGEN_MODELS to the directory
@@ -40,7 +40,7 @@
 # both, but the fix is this file: one tag, changed in both places.
 services:
   engine:
-    image: ghcr.io/peonist-ai/halogen-flash-server:0.6.3
+    image: ghcr.io/peonist-ai/halogen-flash-server:0.7.0
     command: ["engine"]
     environment:
       # Separate netns from the api service, so the engine must listen on all
@@ -72,6 +72,19 @@ services:
       # beside the checkpoint. An image costs about 1,000 tokens at 1280x800
       # and 2,040 at 1080p, out of the same context as the prompt.
       HALOGEN_VISION_TOWER: ${HALOGEN_VISION_TOWER:-}
+      #
+      # BRING YOUR OWN GGUF (0.7.0). Point this at a llama.cpp GGUF of the
+      # model (any shard of a split) and the engine repacks it into RAM at
+      # startup, losslessly, and serves it with its own draft head
+      # (qwen38-flash-next-mtp.hgn, 1.4 GiB, beside the GGUF or from
+      # HALOGEN_MTP_HEAD). The models volume then holds the GGUF, the head
+      # and tokenizer/; no checkpoint, no sidecar. Startup is a read of the
+      # whole file every time unless HALOGEN_GGUF_CACHE=1 keeps the repack
+      # beside it (about 70 GiB, written once; needs the volume writable).
+      # The README's "Bring your own GGUF" section has which files and the
+      # numbers.
+      # HALOGEN_CHECKPOINT: /models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf
+      # HALOGEN_GGUF_CACHE: "1"
     volumes:
       # The directory `hf download` wrote. It holds the checkpoint, the quality
       # sidecar the engine picks up automatically, and tokenizer/.
@@ -112,7 +125,7 @@ services:
     restart: unless-stopped
 
   api:
-    image: ghcr.io/peonist-ai/halogen-flash-server:0.6.3
+    image: ghcr.io/peonist-ai/halogen-flash-server:0.7.0
     command: ["api"]
     depends_on:
       engine:

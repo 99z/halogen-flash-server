@@ -186,6 +186,7 @@ kv_budget_note() {
   # so was printed on the line below in every such report and nothing
   # compared it to MemTotal. This does. Informational; the pool is not
   # resized, because below one context there is no smaller pool to pick.
+  local wt="68 GiB"; if is_gguf; then wt="72 GiB (an 8-bit GGUF trunk, repacked into RAM)"; fi
   used_gib=$(awk '/MemTotal/{t=$2} /MemAvailable/{a=$2} END{printf "%.1f", (t-a)/1048576}' /proc/meminfo 2>/dev/null || echo "0")
   if awk -v u="$used_gib" 'BEGIN{exit !(u >= 10)}'; then
     echo "halogen: WARNING ${used_gib} GiB of host RAM is in use before this server starts. The server sizes itself from the machine's total and leaves a fixed" \
@@ -195,16 +196,20 @@ kv_budget_note() {
   fi
   if [ "${HALOGEN_KV_POOL:-1}" = "0" ]; then
     echo "halogen: KV budget ${ENG_SLOTS} slot(s) x ${ENG_CTX} ctx = ${kv_gib} GiB" \
-         "(~26 KiB/position/slot, HALOGEN_KV_POOL=0) + ${cache_gib} GiB prompt cache in RAM${HALOGEN_CACHE_FILE:+ (snapshot on file)}, on top of roughly 68 GiB" \
+         "(~26 KiB/position/slot, HALOGEN_KV_POOL=0) + ${cache_gib} GiB prompt cache in RAM${HALOGEN_CACHE_FILE:+ (snapshot on file)}, on top of roughly ${wt}" \
          "of weights and 11 GiB of scratch. Those last two are estimates for this pre-flight check; the engine prints its measured figures once loaded," \
          "including the large lookup table it reads from disk and never holds. MemAvailable now ${avail_gib} GiB."
   else
     echo "halogen: KV budget ${ENG_SLOTS} slot(s) over one ${ENG_POOL}-position pool (each request up to ${ENG_CTX}) = ${kv_gib} GiB" \
-         "(~28 KiB/position incl. block scratch + ~115 MiB/slot) + ${cache_gib} GiB prompt cache in RAM${HALOGEN_CACHE_FILE:+ (snapshot on file)}, on top of roughly 68 GiB" \
+         "(~28 KiB/position incl. block scratch + ~115 MiB/slot) + ${cache_gib} GiB prompt cache in RAM${HALOGEN_CACHE_FILE:+ (snapshot on file)}, on top of roughly ${wt}" \
          "of weights and 11 GiB of scratch. Those last two are estimates for this pre-flight check; the engine prints its measured figures once loaded," \
          "including the large lookup table it reads from disk and never holds. MemAvailable now ${avail_gib} GiB."
   fi
-  awk -v kv="$kv_gib" -v cg="$cache_gib" -v av="$avail_gib" 'BEGIN{ if (av != "?" && kv+cg+80 > av)
+  # 0.7.0: a GGUF trunk is repacked into RAM in full and its 8-bit layers
+  # are larger than the engine's own checkpoint's: ~72 GiB for unsloth's
+  # UD-IQ4_XS against ~68 for the .hgn. The engine prints the exact figure.
+  local w_gib=80; if is_gguf; then w_gib=84; fi
+  awk -v kv="$kv_gib" -v cg="$cache_gib" -v av="$avail_gib" -v w="$w_gib" 'BEGIN{ if (av != "?" && kv+cg+w > av)
     print "halogen: WARNING: that budget is close to or over what this host has free.\n  If startup ends in \"HIP … out of memory\", lower HALOGEN_KV_POOL_POSITIONS (the pool) or HALOGEN_MAX_TOK (the prefill arena);\n  a 1,048,576-position pool fits only with HALOGEN_MAX_TOK=16384." > "/dev/stderr" }'
 }
 
@@ -221,6 +226,14 @@ kv_budget_note() {
 maybe_download() {
   [ -n "${HALOGEN_DOWNLOAD:-}" ] || return 0
   [ -f "$HALOGEN_CHECKPOINT" ] && return 0
+  # 0.7.0: a GGUF is the user's file (unsloth's, or their own llama-quantize);
+  # the weights repo does not carry one and this must not fetch 115 GiB of the
+  # engine's checkpoint in its place.
+  if is_gguf_path; then
+    echo "halogen: $HALOGEN_CHECKPOINT is a GGUF and is not there; GGUF files are not downloaded by this image." >&2
+    echo "  Put the file (every shard of a split) in the models volume and point HALOGEN_CHECKPOINT at any shard." >&2
+    exit 1
+  fi
 
   local dir; dir="$(dirname "$HALOGEN_CHECKPOINT")"
   if [ ! -w "$dir" ]; then
@@ -268,8 +281,18 @@ maybe_download() {
 # it says what is missing and how to get it. A fetch that changes nothing (the
 # Hub not yet carrying the new file, or a transient failure) leaves the file on
 # disk in place and the server starts on it.
+# 0.7.0, public issue #47 (Biggles10-claude): this was `head -c 262144 "$1" |
+# grep -aq PAT` under `set -o pipefail`. The marker sits at byte 115,944 of
+# the published sidecar, past the pipe buffer, so grep exited on the match,
+# head died of SIGPIPE (141), the pipeline's status was head's, and the
+# function returned FALSE on the current file: every 0.6.0+ start printed
+# the "predates 0.6.0" note, and HALOGEN_DOWNLOAD with a writable volume
+# fetched the sidecar again on every start. A `producer | grep -q` under
+# pipefail is that shape whenever the match precedes the producer's end;
+# the producer goes in a process substitution instead, so the status is
+# grep's alone.
 sidecar_is_current() {
-  head -c 262144 "$1" | grep -aq "mtp.fc_hidden.weight"
+  grep -aq "mtp.fc_hidden.weight" <(head -c 262144 "$1")
 }
 update_sidecar() {
   local side="$1"
@@ -296,11 +319,63 @@ need_ckpt() {
   [ -f "$HALOGEN_CHECKPOINT" ] || {
     echo "halogen: no checkpoint at $HALOGEN_CHECKPOINT" >&2
     echo "  mount it:  -v /path/to/models:/models:ro" >&2
-    echo "  or point:  -e HALOGEN_CHECKPOINT=/models/<file>.hgn" >&2
+    echo "  or point:  -e HALOGEN_CHECKPOINT=/models/<file>.hgn (or any shard of a GGUF)" >&2
     exit 1; }
-  check_sidecar
+  if is_gguf; then check_gguf; else check_sidecar; fi
   check_vision
   kv_budget_note
+}
+
+# 0.7.0: BRING YOUR OWN GGUF. HALOGEN_CHECKPOINT may name a llama.cpp GGUF
+# of this model (any shard of a split; the engine finds the siblings by
+# name). The engine repacks it into RAM at every start, losslessly, reads
+# its lookup table from the file in place, and takes its MTP head from the
+# engine's own head file, `qwen38-flash-next-mtp.hgn` (1.4 GiB, on the
+# weights repo), which this resolves the way the quality sidecar is: beside
+# the checkpoint by default, HALOGEN_MTP_HEAD to point elsewhere, fetched
+# with HALOGEN_DOWNLOAD when the volume is writable. Without it the engine
+# cannot start on a GGUF, and it says so here rather than after the repack.
+# The quality sidecar does not apply to a GGUF trunk (its tensors are the
+# engine's own checkpoint's), so check_sidecar is not run.
+is_gguf_path() { case "$HALOGEN_CHECKPOINT" in *.gguf) return 0;; esac; return 1; }
+is_gguf() {
+  [ -f "$HALOGEN_CHECKPOINT" ] && [ "$(head -c 4 "$HALOGEN_CHECKPOINT" 2>/dev/null)" = "GGUF" ]
+}
+check_gguf() {
+  local dir; dir="$(dirname "$HALOGEN_CHECKPOINT")"
+  local head="${HALOGEN_MTP_HEAD:-$dir/qwen38-flash-next-mtp.hgn}"
+  echo "halogen: $HALOGEN_CHECKPOINT is a GGUF: it is repacked into RAM at startup, losslessly, on every start"
+  echo "         (about 20 s from a cold NVMe disk on the reference machine, 9 s warm; HALOGEN_GGUF_CACHE=1 keeps"
+  echo "         a copy beside it and a warm restart is then about 1 s) and served with the engine's own draft"
+  echo "         head. The quality sidecar does not apply to a GGUF trunk."
+  if [ ! -f "$head" ]; then
+    if [ -n "${HALOGEN_DOWNLOAD:-}" ] && [ -w "$dir" ]; then
+      echo "halogen: fetching the draft head $(basename "$head") from $HALOGEN_DOWNLOAD (1.4 GiB)"
+      HF_HUB_OFFLINE=0 hf download "$HALOGEN_DOWNLOAD" "$(basename "$head")" --local-dir "$dir" || true
+    fi
+    [ -f "$head" ] || {
+      echo "halogen: no draft head at $head" >&2
+      echo "  A GGUF trunk needs the engine's MTP head file, qwen38-flash-next-mtp.hgn (1.4 GiB)," >&2
+      echo "  from the weights repo. Put it beside the GGUF, point HALOGEN_MTP_HEAD at it, or start" >&2
+      echo "  once with HALOGEN_DOWNLOAD set and the models volume mounted read-write." >&2
+      exit 1; }
+  fi
+  export HALOGEN_MTP_HEAD="$head"
+  echo "halogen: draft head $head ($(du -h "$head" | cut -f1))"
+  case "${HALOGEN_GGUF_CACHE:-}" in
+    ""|0) : ;;
+    1) echo "halogen: HALOGEN_GGUF_CACHE=1: the repack is written once beside the GGUF (about 70 GiB for an 8-bit trunk) and read on later starts" ;;
+    *) [ -d "$HALOGEN_GGUF_CACHE" ] && [ -w "$HALOGEN_GGUF_CACHE" ] || {
+         echo "halogen: HALOGEN_GGUF_CACHE=$HALOGEN_GGUF_CACHE is not a writable directory" >&2; exit 1; }
+       echo "halogen: HALOGEN_GGUF_CACHE: the repack is written once to $HALOGEN_GGUF_CACHE (about 70 GiB for an 8-bit trunk) and read on later starts" ;;
+  esac
+  # A GGUF-only volume has no tokenizer directory; the weights repo's is
+  # small and the same Qwen tokenizer, so fetch it when asked and allowed.
+  if [ ! -f "$HALOGEN_TOKENIZER/tokenizer.json" ] && [ ! -f "$dir/tokenizer/tokenizer.json" ] \
+     && [ -n "${HALOGEN_DOWNLOAD:-}" ] && [ -w "$dir" ]; then
+    echo "halogen: fetching the tokenizer from $HALOGEN_DOWNLOAD"
+    HF_HUB_OFFLINE=0 hf download "$HALOGEN_DOWNLOAD" --include "tokenizer/*" --local-dir "$dir" || true
+  fi
 }
 
 # VISION IS OFF UNTIL A PATH IS GIVEN, and that is the feature's whole safety

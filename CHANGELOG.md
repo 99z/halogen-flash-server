@@ -1,5 +1,103 @@
 # Changelog
 
+## 0.7.0
+
+### Added
+
+- **Bring your own GGUF.** `HALOGEN_CHECKPOINT` may name a llama.cpp GGUF of
+  this model (any shard of a split), and the engine opens it itself: at
+  startup it repacks every tensor but the lookup table into the layouts its
+  kernels read, losslessly (the file's own quantized values, moved, never
+  requantized), reads the lookup table from the GGUF in place, and takes the
+  draft head from a 1.4 GiB file of its own (`qwen38-flash-next-mtp.hgn`, on
+  the weights repo; fetched by `HALOGEN_DOWNLOAD`, or `HALOGEN_MTP_HEAD`). The
+  GGUF is then the only large file on disk: 94 GB for unsloth's `UD-IQ4_XS`
+  against the 118 GiB of the engine's own checkpoint.
+
+  Read losslessly: `IQ4_NL`, `IQ4_XS`, `IQ3_S` and `Q4_0` experts, a `Q8_0`
+  trunk, a `Q6_K` output projection, which is unsloth's `UD-IQ4_XS` build and
+  any `llama-quantize` output in those types. The K-quant builds (`Q4_K`,
+  `Q5_K`, `Q5_1`, `Q4_1`, unsloth's `UD-Q4_K_XL`) and the IQ2/IQ1 families are
+  refused by name before anything is loaded; those need kernels for their
+  block layouts and are next.
+
+  Measured on the reference machine with unsloth's `UD-IQ4_XS` against the
+  engine's own checkpoint with its quality sidecar, MTP on in both:
+  perplexity 0.7 to 2.1% better on three corpora and the fixture agreement
+  184/192 against 182 (the 8-bit trunk carries it); prefill within 1% at
+  8,192 and 32,768; serial decode 25.4 tok/s against 35.4 (the 8-bit trunk
+  is 2 GB more a token, and no lossless repack avoids it), 42-45 on
+  coding-agent turns with both drafters against 55-57. Against llama.cpp on
+  the same file, same machine, same session, at their settings on stock ROCm
+  7.14: prefill 1.9x at 8,192 and 2.7x at 32,768, serial decode 1.1 to 1.3x,
+  1.9x on coding-agent turns; every speculative stream byte-identical to
+  serial greedy on their file too. The repacked weights are byte-identical
+  to `tools/gguf2hgn.py`'s (the reference conversion: every tensor's sha256,
+  the header and the table), and a server on the GGUF is bitwise a server on
+  that file. The engine's own checkpoint path did not move (bitwise on a
+  32,768-token prefill and two fixtures).
+
+  Startup on a GGUF is a read of the whole file on eight threads: 18 s from
+  a cold disk on the reference machine, 9 s warm, on every start (the
+  repacked weights live in RAM; the page cache is dropped behind them).
+  `HALOGEN_GGUF_CACHE=1` writes the repack out once beside the GGUF (70 GiB,
+  five minutes on the reference drive; `=<dir>` puts it elsewhere) and later
+  starts take the engine's own path, 1.4 s warm and 16 s cold; a cache is
+  checked against the shards' sizes and modification times and is never used
+  stale (rebuilt with the flag, ignored without, both said in the log).
+  `HALOGEN_GGUF_THREADS` (default 8) sets the repack's workers.
+
+- **`/v1/responses` returns the model's reasoning** (#44, reported with
+  frame-by-frame timings by [@samuelobao](https://github.com/samuelobao)): a
+  `reasoning` output item ahead of the message, its text as a `reasoning_text`
+  content part streamed in `response.reasoning_text.delta` events, and, when
+  the request asks for a reasoning summary (Codex sends
+  `reasoning: {"summary": "auto"}`), the same text again as `summary_text`
+  with the `response.reasoning_summary_*` events, since there is no separate
+  summarizer. Codex renders summaries by default and raw content only with
+  `show_raw_agent_reasoning`. Both routes now report
+  `output_tokens_details.reasoning_tokens` (`completion_tokens_details` on
+  chat), counted from the position of the `</think>` token, and the
+  Responses usage carries `input_tokens_details.cached_tokens`. Dropping the
+  reasoning was a decision from when the only documented reasoning item
+  carried an encrypted payload; it no longer holds.
+- **Statistics in llama-server's shape** (#45, requested by
+  [@DomiStyle](https://github.com/DomiStyle) for llama-swap): a `timings`
+  object on every response on both routes, on the non-streamed body, the
+  stream's finish chunk and its usage chunk, and the `response.completed`
+  frame: `prompt_n`, `predicted_n`, `prompt_ms`, `predicted_ms`,
+  `prompt_per_second`, `predicted_per_second`, `cache_n`, `draft_n`,
+  `draft_n_accepted`. Every field is the engine's own per-request line;
+  `draft_n` counts the draft head's proposals and the prompt-lookup chains'
+  proposed tokens together (the engine now reports the latter), so drafted
+  against accepted is exact.
+- `/health` reports `checkpoint_format`: `hgn`, `gguf` or `gguf-cache`.
+- `flash_serve --repack IN.gguf --out OUT.hgn [--with-table]` writes the same
+  repack to a file, for anyone who wants the artifact; `--repack-hash` prints
+  a sha256 per tensor for the file it would write.
+
+### Fixed
+
+- **Every start on the current quality sidecar said it predated 0.6.0**, and
+  with `HALOGEN_DOWNLOAD` set and the volume writable fetched the sidecar
+  again each time. The check read the file's first 256 KB through a pipe
+  into `grep -q` under `pipefail`; the marker it looks for sits at byte
+  115,944 of the published file, past the pipe buffer, so `grep` exited on
+  the match, `head` died of SIGPIPE and the pipeline's status was the
+  producer's. Found and diagnosed by
+  [@Biggles10-claude](https://github.com/Biggles10-claude) (#47). The
+  producer is a process substitution now, and the release gate runs a cell
+  on the current sidecar (every earlier run had only the stale one to test
+  against).
+
+### Documentation
+
+- README: [Bring your own GGUF](README.md#bring-your-own-gguf), with the
+  format table, the memory and disk figures, the quality and decode trade in
+  numbers, and the same-file comparison against llama.cpp. The published
+  prefill, decode and quality rows are unchanged: the engine's own checkpoint
+  is what they measure.
+
 ## 0.6.3
 
 Engine only, one loop. No kernel change, no weight change, bitwise identical

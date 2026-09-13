@@ -56,6 +56,12 @@ a quality trade. Since 0.6.0 there are two draft sources, the model's own
 draft head and the request's own text (prompt lookup), and the guarantee
 covers both.
 
+Since 0.7.0 the engine also opens a **llama.cpp GGUF** of this model directly:
+point it at the file you already have (unsloth's `UD-IQ4_XS`, say) and it
+runs on these kernels, with the same speculation and the same identity
+guarantee. Same file, faster runtime, no conversion step. See [Bring your own
+GGUF](#bring-your-own-gguf) for which files, and for the numbers.
+
 ---
 
 ## Contents
@@ -73,6 +79,8 @@ covers both.
   and what is not
 - **[Precision](#precision-what-you-get-and-how-to-trade-it)**: what you get,
   and how to trade it
+- **[Bring your own GGUF](#bring-your-own-gguf)**: run a llama.cpp file of this
+  model on this engine, and what that costs and buys
 - **[Configuration](#configuration)**: every setting worth knowing, plus
   [cache modes](#choosing-a-cache-mode),
   [context and memory](#context-and-memory-one-kv-pool-several-conversations)
@@ -95,7 +103,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.6.3
+  ghcr.io/peonist-ai/halogen-flash-server:0.7.0
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -119,7 +127,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.6.3
+  ghcr.io/peonist-ai/halogen-flash-server:0.7.0
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -306,13 +314,30 @@ Streaming and non-streaming both work, `function_call` and
 are ignored rather than rejected. `instructions` and any `developer` turns are
 folded into the system prompt.
 
-Two things it does not do. **Reasoning is not returned**: the model thinks
-before it answers, but the Responses API carries reasoning as an encrypted item
-the client hands back on the next turn, and this server does not store
-anything, so a reasoning summary would be invented rather than real. The answer
-is unaffected. **There is no response store**, so `previous_response_id`,
-retrieving a response by id, and cancelling one are not available; send the
-history with each request, which is what Codex does.
+**Reasoning is returned** (since 0.7.0; #44). The model's thinking goes out
+as a `reasoning` output item ahead of the message, its text as a
+`reasoning_text` content part streamed in `response.reasoning_text.delta`
+events, and `usage.output_tokens_details.reasoning_tokens` says how much of
+the output it was (both routes carry that count). When the request asks for
+a reasoning summary, as Codex does (`reasoning: {"summary": "auto"}`), the
+same text is sent again as the item's `summary_text`, with the
+`response.reasoning_summary_*` events: there is no separate summarizer, the
+summary is the reasoning. Codex renders summaries by default and shows raw
+reasoning content only with `show_raw_agent_reasoning = true` in its config,
+so with that setting on you will see the text twice. No `encrypted_content`
+is sent, and a `reasoning` item echoed back in a later turn is dropped, as
+before. **There is no response store**, so `previous_response_id`, retrieving
+a response by id, and cancelling one are not available; send the history with
+each request, which is what Codex does.
+
+**Statistics for llama-swap** (since 0.7.0; #45): every response, on both
+routes, carries a `timings` object in llama-server's shape (`prompt_n`,
+`predicted_n`, `prompt_ms`, `predicted_ms`, `prompt_per_second`,
+`predicted_per_second`, `cache_n`, `draft_n`, `draft_n_accepted`), on the
+non-streamed body and on a stream's last frames, so llama-swap's activity
+page shows prefill and decode rates and the draft count. `draft_n` counts the
+draft head's proposals and the prompt-lookup chains' together; the numbers
+are the engine's own per-request line, copied.
 
 Verified against the Codex CLI driving real tasks end to end, and separately
 against the official `openai` Python SDK, which parses every event into its own
@@ -526,8 +551,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.6.3 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.6.3 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.7.0 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.7.0 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -647,6 +672,103 @@ configuration.
 4-bit weights are a **correctness precondition, not an optimization**: 125B
 parameters plus a 51B-parameter n-gram embedding table is 335 GiB at BF16 and
 173 GiB at FP8, against 124 GB of unified memory.
+
+---
+
+## Bring your own GGUF
+
+Since 0.7.0 `HALOGEN_CHECKPOINT` may name a llama.cpp GGUF of this model
+instead of the engine's own checkpoint. The engine reads the file itself: at
+startup it repacks every tensor but the lookup table into the layouts its
+kernels read, **losslessly** (the file's own quantized values, moved, not
+requantized), reads the lookup table from the GGUF in place, and takes the
+draft head from a 1.4 GiB file of its own, because a GGUF carries no draft
+head this engine can run. Nothing is written to disk unless you ask.
+
+```bash
+podman run --rm -p 8731:8731 \
+  --device /dev/kfd --device /dev/dri --group-add keep-groups \
+  --ipc=host --ulimit memlock=-1:-1 \
+  -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
+  -e HALOGEN_CHECKPOINT=/models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
+  -v ~/gguf-models:/models \
+  ghcr.io/peonist-ai/halogen-flash-server:0.7.0
+```
+
+Name any shard of a split; the siblings are found by name. With
+`HALOGEN_DOWNLOAD` set and the volume writable, the first start fetches the
+draft head (`qwen38-flash-next-mtp.hgn`) and the tokenizer from the weights
+repo, 1.4 GiB in all; the GGUF itself is never downloaded by this image. Or
+put both beside the GGUF yourself and mount the volume read-only.
+`HALOGEN_MTP_HEAD` points at the head file if it lives elsewhere.
+
+**Which files.** The repack is lossless only where the format's values are
+a small set times a per-block scale, which is the whole `IQ4_NL` / `IQ4_XS` /
+`IQ3_S` / `Q4_0` family for the experts, `Q8_0` for the dense layers and
+`Q6_K` for the output projection; that is unsloth's `UD-IQ4_XS` build exactly
+(it is what every number below was measured on), and any `llama-quantize`
+output in those types. The K-quant builds (`Q4_K`, `Q5_K`, `Q5_1`, `Q4_1`;
+unsloth's `UD-Q4_K_XL`) and the IQ2/IQ1 families are **refused by name at
+startup**, before anything is loaded, because reading them needs kernels for
+their block layouts rather than a repack, and a lossy fallback would make
+"the same file" untrue. Those are next.
+
+**What it costs and buys, measured on the reference machine with unsloth's
+`UD-IQ4_XS`** (the same file llama.cpp reads; the engine's own checkpoint with
+its quality sidecar is the other arm; MTP on in both):
+
+| | halogen's own checkpoint | unsloth UD-IQ4_XS on halogen |
+|---|---|---|
+| on disk | 118 GiB (two files) | **94 GB, the GGUF only** |
+| held in RAM | 68 GiB | 72 GiB (the 8-bit dense layers, repacked) |
+| perplexity, three corpora | | **0.7 to 2.1% better** |
+| fixture agreement with transformers | 182/192 | 184/192 |
+| prefill 8,192 / 32,768 | 1,246 / 1,424 tok/s | 1,246 / 1,423 (within 1%) |
+| decode, serial, short context | 35.4 tok/s | 25.4 (**-28%**) |
+| decode, draft head + prompt lookup, coding-agent turns | 55-57 tok/s | 42-45 |
+
+The quality row is the interesting one: unsloth's file keeps the dense layers
+at 8 bits and crushes the experts to about 3.4 bits, and that beats our
+calibrated 4-bit dense layers over 4.5-bit experts. The decode row is the
+price of the same bytes: an 8-bit trunk is 2 GB more per token at 240 GB/s,
+and no lossless repack avoids it. Prefill is compute-bound and does not care.
+
+**Against llama.cpp on the same bytes, same machine, same session** (their
+`strix-halo` branch, built and run at their settings on stock ROCm 7.14, so
+their numbers here are below their own published figures; the ratios are
+about this file on a stock box, and the decode ratio is the durable one):
+prefill **1.9x at 8,192 and 2.7x at 32,768**; serial decode 1.1x at short
+context and 1.3x at 32K; with the draft head 1.3 to 1.4x; on coding-agent
+turns with both drafters **1.9x**. The identity guarantee holds on their file:
+every speculative stream's tokens were byte-identical to serial greedy.
+
+**Startup.** The repack reads the whole file once, on eight threads
+(`HALOGEN_GGUF_THREADS`): **18 s from a cold disk on the reference machine,
+9 s with the file in the page cache**, and every start pays it, because the
+repacked weights live in RAM and the page cache is dropped behind them so the
+file is not held twice. That is no slower than the engine's own checkpoint
+loads from a cold disk on the same machine (about 30 s for its 118 GiB).
+`HALOGEN_GGUF_CACHE=1` writes the repack out once beside
+the GGUF (70 GiB; five minutes on the reference drive; `=<dir>` puts it
+elsewhere) and later starts take the engine's own path: 1.4 s when the cache
+file is warm, 16 s cold. It buys 7 s on a warm restart and 2 s on a cold one
+here, since the cache file is larger than the bytes the repack reads; it is
+for a host whose restarts are warm and whose disk is dear, not a requirement.
+The write needs the volume mounted read-write with the room to spare;
+without either it is skipped with a line in the log and the server starts
+without it, and a file left half-written by a crash is removed on the next
+start.
+A cache is checked against the shards' sizes and modification times on every
+start and is never used stale: with the flag set it is rebuilt, without it
+ignored, both said in the log. `/health` reports `checkpoint_format` as
+`gguf` or `gguf-cache`.
+
+**What does not apply.** The quality sidecar is the engine's own checkpoint's
+and is not loaded over a GGUF trunk (the log says so). The draft head is ours
+and was fitted to our trunk; on unsloth's it accepts fewer draft tokens on
+prose (45% against 59%) and the same on code, which is inside the decode
+numbers above. `flash_serve --repack IN.gguf --out OUT.hgn` writes the same
+repack to a file for anyone who wants the artifact.
 
 ---
 
@@ -1020,7 +1142,7 @@ cat /proc/cmdline
   to pay only for exactly two code-heavy streams and is not built.
 - **No response store.** `/v1/responses` generates and streams; it does not
   keep responses, so `previous_response_id`, retrieval by id and cancellation
-  are not available, and reasoning is not returned to the client.
+  are not available.
 - **Images are read, not generated.** There is no image output, and no audio
   or video input.
 - **One GPU, one model family.** gfx1151 only. The build hard-rejects other
