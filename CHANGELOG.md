@@ -26,6 +26,40 @@
   requests. Greedy only: a sampled request with a schema is a 400 (say
   `temperature: 0`), and so is a schema with an image. `HALOGEN_GRAMMAR=0`
   turns it off.
+- **`/metrics`: Prometheus text in llama-server's metric names** (asked
+  for on r/LocalLLaMA after 0.7.0's `timings`). `llamacpp:prompt_tokens_total`,
+  `prompt_seconds_total`, `tokens_predicted_total`,
+  `tokens_predicted_seconds_total` (counters over the engine's own per-request
+  numbers, `prompt_n` being the processed count), `prompt_tokens_seconds` and
+  `predicted_tokens_seconds` (gauges over the requests since the last scrape,
+  as llama-server's), `requests_processing`, `requests_deferred`,
+  `kv_cache_tokens` and `kv_cache_usage_ratio` (the positions the requests in
+  flight reserve, prompt + `max_tokens` each, over the pool), plus `halogen:`
+  counters for what llama-server has no name for: requests, prompt tokens the
+  cache covered, draft tokens proposed and accepted, structured requests.
+  Always on, no engine round trip; `/health` names it.
+- **`reasoning_effort: "none"` turns thinking off for the request** (issue
+  #50, @devThLan), on `/v1/chat/completions` and as `reasoning: {"effort":
+  "none"}` on `/v1/responses`. It was a 400, and agent clients send it on a
+  real path (Hermes turns thinking off for the continuation after a turn that
+  spent its whole budget thinking, and for title generation). It is the same
+  as `chat_template_kwargs: {"enable_thinking": false}`, wins over
+  `HALOGEN_ENABLE_THINKING=1` for that request, and `/health` lists it under
+  `reasoning_effort_values`. The server-side default for thinking off stays
+  `HALOGEN_ENABLE_THINKING=0`; `HALOGEN_REASONING_EFFORT=none` refuses at
+  startup and says so.
+
+### Fixed
+
+- **`timings.prompt_n` is the number of prompt tokens the engine processed,
+  not the whole prompt** (issue #48, @felladrin). `prompt_ms` was always the
+  engine's time on the tokens after the prefix the cache covered, so on a warm
+  turn `prompt_per_second` divided the whole context by the tail's time
+  (97,052 tokens over 1.8 s read as 53,000 tok/s in llama-swap). Now
+  `prompt_n` excludes `cache_n`, as llama-server's does (the context is
+  `prompt_n + cache_n + predicted_n`), and the rate is over those tokens; a
+  fully cached prompt reads `prompt_n: 0` and no rate. `usage` is unchanged:
+  `prompt_tokens` is still the whole prompt with `cached_tokens` beside it.
 
 ## 0.7.0
 

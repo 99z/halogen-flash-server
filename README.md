@@ -258,7 +258,9 @@ truncation, so ask for what you need and the server will tell you if it is too
 much. Hard reasoning problems can genuinely exceed 8192: pass a larger budget,
 or `"reasoning_effort": "low"` to make the model think less. Accepted efforts
 are `minimal`, `low`, `medium`, `high` and `xhigh`; the model's own default is
-`xhigh`.
+`xhigh`. `"reasoning_effort": "none"` turns thinking off for that request
+(the same as `chat_template_kwargs: {"enable_thinking": false}`, and
+`reasoning: {"effort": "none"}` on `/v1/responses`).
 
 **Any of three field names works**, and they mean the same thing here:
 `max_completion_tokens` (current OpenAI Chat Completions), `max_output_tokens`
@@ -338,6 +340,20 @@ non-streamed body and on a stream's last frames, so llama-swap's activity
 page shows prefill and decode rates and the draft count. `draft_n` counts the
 draft head's proposals and the prompt-lookup chains' together; the numbers
 are the engine's own per-request line, copied.
+
+**Prometheus** (since 0.8.0): `GET /metrics` answers in llama-server's
+metric names, so a dashboard built for llama.cpp (or for llama-swap's
+upstream) reads this server unchanged: `llamacpp:prompt_tokens_total`,
+`llamacpp:tokens_predicted_total` and their `_seconds_total` counters (the
+engine's own per-request numbers, summed; `prompt_n` is the processed count),
+the `prompt_tokens_seconds` / `predicted_tokens_seconds` gauges over the
+requests since the last scrape, `requests_processing`, `requests_deferred`,
+`kv_cache_tokens` and `kv_cache_usage_ratio` (the positions the requests in
+flight reserve, prompt plus `max_tokens` each, over the pool). Beside them,
+`halogen:requests_total`, `halogen:prompt_tokens_cached_total`,
+`halogen:draft_tokens_total`, `halogen:draft_tokens_accepted_total` and
+`halogen:structured_requests_total`. Always on, no flag, no engine round
+trip.
 
 **Structured output** (since 0.8.0; #14, #43). `response_format:
 {"type": "json_schema", "json_schema": {"name": ..., "schema": {...}}}` and
@@ -754,6 +770,11 @@ unsloth's `UD-Q4_K_XL`) and the IQ2/IQ1 families are **refused by name at
 startup**, before anything is loaded, because reading them needs kernels for
 their block layouts rather than a repack, and a lossy fallback would make
 "the same file" untrue. Those are next.
+
+**The short version: the GGUF costs decode and 4 GiB of RAM, and nothing
+else.** Same prefill, better perplexity, 24 GB less disk; serial decode about
+28% slower and coding-agent turns about 22% slower, because its 8-bit dense
+layers are 2 GB more to read per token. The full comparison:
 
 **What it costs and buys, measured on the reference machine with unsloth's
 `UD-IQ4_XS`** (the same file llama.cpp reads; the engine's own checkpoint with
