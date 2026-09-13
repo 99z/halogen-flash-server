@@ -103,7 +103,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.7.0
+  ghcr.io/peonist-ai/halogen-flash-server:0.8.0
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -127,7 +127,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.7.0
+  ghcr.io/peonist-ai/halogen-flash-server:0.8.0
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -338,6 +338,48 @@ non-streamed body and on a stream's last frames, so llama-swap's activity
 page shows prefill and decode rates and the draft count. `draft_n` counts the
 draft head's proposals and the prompt-lookup chains' together; the numbers
 are the engine's own per-request line, copied.
+
+**Structured output** (since 0.8.0; #14, #43). `response_format:
+{"type": "json_schema", "json_schema": {"name": ..., "schema": {...}}}` and
+`{"type": "json_object"}` on `/v1/chat/completions` and `/v1/completions`,
+`text: {"format": {"type": "json_schema", "name": ..., "schema": {...}}}`
+and `{"type": "json_object"}` on `/v1/responses` (the shape Codex sends; its
+approvals reviewer sends one on every auto-reviewed tool call, which is what
+#43 hit). The engine enforces the schema while it decodes: every token is
+chosen from the tokens the schema allows next, so the reply parses and
+validates by construction, with no retry and no repair. It is greedy
+decoding under a mask, nothing else changes: the same request without the
+schema is bitwise what it was, and a constrained request is identical
+whether it decoded serially, with the draft head, with prompt lookup, or
+beside other requests. It costs nothing measurable: the schema is compiled
+once (a millisecond) and every state's mask lives on the GPU, so the decode
+loop reads a pointer.
+
+What is enforced: `type` (object, array, string, number, integer, boolean,
+null, and `["string", "null"]`), `properties` with keys emitted in schema
+order, `required` (an optional key may be skipped), `additionalProperties`
+(`false`, `true`, or a schema: extra keys only after the listed ones),
+`items`, `minItems`, `maxItems`, `minLength`, `maxLength`, `enum`, `const`,
+`anyOf` (`oneOf` is treated as `anyOf`), `$ref` and `$defs` including
+recursive ones. Accepted and not enforced: `minimum`, `maximum`,
+`exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`, and the annotation
+keywords. Refused with a 400 naming the keyword: `pattern`, `format`,
+`allOf`, `not`, `if`/`then`/`else`, `patternProperties`, `dependentRequired`,
+`dependentSchemas`, `uniqueItems`, `contains`, `propertyNames`,
+`unevaluated*`, `minProperties`, `maxProperties`, `prefixItems`. `/health`
+lists all three under `structured_output`.
+
+The reasoning block is not constrained: with thinking on the model thinks
+freely and the JSON starts after `</think>`. A request with tools may open a
+tool call instead of the JSON (the schema binds the final text, not a call),
+which is how the Codex reviewer's own read-only tool checks keep working.
+Whitespace between tokens is allowed, so a pretty-printed reply is fine, but
+at most two whitespace-only tokens in a row (a forbidden preference
+otherwise falls to a newline, and then another). Only the end-of-turn token
+is legal once the value is complete, so the reply is exactly the JSON.
+Temperature must be 0 (or omitted): a sampled request with a schema is a
+400 for now, and so is a schema with an image. `HALOGEN_GRAMMAR=0` turns the
+feature off (the 400 of 0.7.0 comes back).
 
 Verified against the Codex CLI driving real tasks end to end, and separately
 against the official `openai` Python SDK, which parses every event into its own
@@ -551,8 +593,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.7.0 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.7.0 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.8.0 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.8.0 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -692,7 +734,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -e HALOGEN_CHECKPOINT=/models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
   -v ~/gguf-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.7.0
+  ghcr.io/peonist-ai/halogen-flash-server:0.8.0
 ```
 
 Name any shard of a split; the siblings are found by name. With

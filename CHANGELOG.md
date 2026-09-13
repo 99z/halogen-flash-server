@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.8.0
+
+### Added
+
+- **Structured output: `response_format` `json_schema` and `json_object`
+  on `/v1/chat/completions` and `/v1/completions`, `text.format` on
+  `/v1/responses`** (issues #14, @hvico, and #43, @fordiy). The engine
+  enforces the schema while it decodes: each token is the greedy choice
+  among the tokens the schema allows next, so the reply parses and
+  validates by construction. The grammar engine is the server's own (no
+  third-party library): OpenAI's strict-mode subset plus `json_object`,
+  keys in schema order, optional keys skippable, `$ref`/`$defs` with
+  recursion, `anyOf`; `pattern`, `format`, `allOf`, `not`, `if`/`then`/
+  `else` and the other keywords it does not enforce are refused by name
+  (the README lists the three sets, and so does `/health` under
+  `structured_output`). The reasoning block stays unconstrained (the JSON
+  starts after `</think>`), a request with tools may open a tool call
+  instead of the JSON (the schema binds the final text, not a call: the
+  Codex approvals reviewer, which sends a schema on every auto-reviewed
+  approval, keeps its read-only tool checks), and only the end-of-turn
+  token is legal once the value is complete. Every request without a
+  schema is bitwise what it was; a constrained request is identical
+  serial, with the draft head, with prompt lookup, and beside other
+  requests. Greedy only: a sampled request with a schema is a 400 (say
+  `temperature: 0`), and so is a schema with an image. `HALOGEN_GRAMMAR=0`
+  turns it off.
+
 ## 0.7.0
 
 ### Added
