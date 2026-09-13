@@ -519,8 +519,9 @@ engine_watchdog() {
       echo "halogen: the engine process is alive and has answered nothing for ${silent}s." >&2
       echo "  PING is answered between decode rounds, between the layers of a prefill, and" >&2
       echo "  while the lookup table is being read, so on a healthy host this is a wedge." >&2
-      echo "  On a host short of RAM it is not: the table is read from disk one page at a" >&2
-      echo "  time and the engine prints 'lookup table: ... took N s' when that runs long." >&2
+      echo "  On a host short of RAM it is not: the table is read from disk (64 reads in" >&2
+      echo "  flight since 0.6.3) and the engine prints 'lookup table: ... took N s' when" >&2
+      echo "  that runs long." >&2
       echo "  If that line appears above, this is a slow host and not a wedge: disable or" >&2
       echo "  raise HALOGEN_ENGINE_WATCHDOG_S (0 = off) and free host memory. Otherwise," >&2
       echo "  shutting the container down so a restart policy can recover it; please" >&2

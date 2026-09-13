@@ -95,7 +95,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.6.2
+  ghcr.io/peonist-ai/halogen-flash-server:0.6.3
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -119,7 +119,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.6.2
+  ghcr.io/peonist-ai/halogen-flash-server:0.6.3
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -526,8 +526,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.6.2 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.6.2 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.6.3 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.6.3 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -748,12 +748,16 @@ chat in a 1M-position pool runs at short-chat speed, and three conversations
 at 250k each generate at about 17 tokens per second apiece.
 
 One cost the pool does carry. A larger pool leaves less RAM for the model's
-file cache, so the first prompt after a restart can take longer to read in
-(measured: a 32,000-token prompt took up to twice its usual 25 s right after a
-fresh start, and its usual time once it had been seen). The default trades some
-of that for a second resident conversation; `HALOGEN_KV_POOL_POSITIONS=262144`
-trades back, and `786432` buys a third conversation where the machine has the
-headroom for it.
+file cache, so the first prompt after a restart reads its rows of the lookup
+table from disk. Before 0.6.3 those rows were read one at a time and a
+32,000-token prompt took up to twice its usual 25 s right after a fresh start
+(up to 50 s more with the table fully evicted). Since 0.6.3 the rows are read
+64 at a time: on this machine's NVMe drive the same first prompt costs about
+1.3 s more than its usual time, and an 8,000-token one under half a second.
+The log line `lookup table: ... took N s on 64 threads` reports it whenever it
+takes 2 s or more. `HALOGEN_KV_POOL_POSITIONS=262144` still leaves more of the
+table cached, and `786432` buys a third resident conversation where the
+machine has the headroom for it.
 
 **Speed by concurrency.** Measured at the engine's own protocol on the
 published image at its defaults (the 8-stream row with `HALOGEN_KV_SLOTS=8`):
@@ -877,8 +881,12 @@ tokens per second on a long one, with the disk busy and the process stuck in
 uninterruptible sleep, is short of file cache rather than short of memory.
 The model keeps a large lookup table on disk and reads it through the page
 cache instead of holding it in RAM, so RAM the KV pool takes is RAM that
-table loses, and a longer prompt touches more of it. The same setting fixes
-it:
+table loses, and a longer prompt touches more of it. Since 0.6.3 the rows a
+prompt needs are read 64 at a time, so a table that is not in the cache costs
+seconds on an NVMe drive rather than minutes, and the log says how long each
+long prompt spent on it (`lookup table: ... took N s on 64 threads`). If that
+line still reads in the tens of seconds, the drive is the limit, and the same
+setting helps:
 
 ```
 -e HALOGEN_KV_POOL_POSITIONS=262144

@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.6.3
+
+Engine only, one loop. No kernel change, no weight change, bitwise identical
+output (checked on a 32,768-token prefill and on a 1,068-token fixture), so
+every published prefill, decode and quality number is unmoved; the prefill
+rows are best-of-two and this changes the first pass only.
+
+### Fixed
+
+- **The first long prompt after a restart read the lookup table one row at a
+  time.** The model's 47.7 GiB n-gram table is read through the page cache,
+  never held in RAM, and on a 128 GB machine running this server there is
+  never enough cache left to hold all of it (about 13 GiB at the defaults),
+  so any prompt whose rows are not cached reads them from disk. Each row is
+  one 4 KB random read, and the engine issued them one after another and
+  waited for each: 28 MB/s on the reference machine's NVMe drive, a
+  32,768-token prompt paying 46 to 52 s on top of its usual 25 s with the
+  table evicted, and 13.5 s on top of an 8,192-token prompt's 7 s. On a
+  host with less RAM to spare the table is never cached, and every long
+  prompt paid that, at whatever the drive or its contention made one read
+  cost; that is the mechanism behind the minutes reported on #10 and #22
+  by [@mqtt-fan](https://github.com/mqtt-fan), whose watchdog then read the
+  silence as a wedge.
+
+  The rows are now read 64 at a time (`HALOGEN_NGRAM_GATHER_THREADS`, `1`
+  restores the old loop). Same bytes to the same places. Measured on the
+  reference machine with the table evicted before each run: the
+  32,768-token first prompt costs 1.3 s over its usual time instead of 46
+  to 52 (8 threads 7.3 s, 16 and 32 about 3 s, 64 1.3 s, 128 1.2 s); the
+  8,192-token one under half a second instead of 13.5. The health PING is
+  answered through the read as before. The `lookup table: ... took N s`
+  line now says how many threads read it.
+
+  What this does not change: a drive that tops out below 64 reads in
+  flight (SATA queues 32; a spinning disk is slow at any depth) gets that
+  drive's depth rather than one; decode is untouched (16 rows a token); and
+  the amount of the table that fits in cache is the same, so
+  `HALOGEN_KV_POOL_POSITIONS=262144` still leaves more of it resident.
+
+### Documentation
+
+- README: the cold-start cost is stated with the version that changed it, in
+  the pool section and in "If the server starts but crawls on long prompts";
+  `--bench-prefill` in the engine's harness prints each pass, so the
+  first-pass cost is a number in the log rather than something inferred.
+
 ## 0.6.2
 
 Front-end only (`tools/serve_api.py`). No kernel change, no weight change, no
