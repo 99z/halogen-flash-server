@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.8.1
+
+### Fixed
+
+- **A token the schema grammar refuses ends the request, not the engine
+  connection** (issue #53, @mjbrn, confirmed by @HIM0413). The speculative
+  loop returned the same code for "the grammar refused this token" as for a
+  dead socket, so the daemon dropped its connection to the front end: a 502
+  for the request and a `ConnectionResetError` for the next one on the same
+  connection. It now ends that one request with a `400` whose message names
+  the token, and every other stream is untouched. The message itself is
+  fixed too: a request that ended mid-generation printed its statistics
+  where the reason belongs (`the engine refused this request: 0 0 0 0 0 0
+  0 0`). The disagreement between the device mask and the host automaton at
+  a union-typed property that produced the illegal token is still open;
+  that request fails cleanly now.
+- **The union-type failure's root cause: a UTF-8 continuation-byte count was
+  missing from the grammar's state key**, so a string state mid-multibyte-character
+  shared a mask with its completed-character sibling and the engine admitted a
+  token it then refused. Reproduced on served requests (a free string of emoji
+  and accented text failed 6 of 8 times before the fix, 0 of 8 after) and
+  fixed; the structured-output test suite is unchanged (128/128).
+- **The prompt cache keeps two entries per conversation, so one session's
+  tool calls no longer evict every other session** (issue #54,
+  @loonylabs-dev). Each turn stored a new entry at a new length and the
+  global LRU then dropped other conversations' anchors: eighteen tool calls
+  in one session cost a 120k conversation a 120 s re-prefill. A region now
+  holds its system-prompt anchor and its newest history entry; a third store
+  replaces the leaf in place. `/cache` reports `superseded`.
+- **The vision tower runs only for images the prompt cache did not cover**
+  (issue #52, @Biggles10-claude). Every image in a request went through the
+  tower on every turn, 2.5 s per 1920x1080 frame, including images whose
+  tokens the cache had restored and whose tower output nothing then read: an
+  identical 8-image request the engine called 0.05 s of prefill took 21.7 s.
+  Covered images now skip the tower; their geometry is still bound.
+
+### Added
+
+- **`max_thinking_tokens`, a thinking budget** (issue #56, @loonylabs-dev),
+  on `/v1/chat/completions` and `/v1/responses`, with
+  `HALOGEN_MAX_THINKING_TOKENS` as the server default (the request wins). If
+  the model has not closed its think block after that many generated tokens,
+  the engine closes it (Qwen's own budget sentence, then `</think>`) and the
+  answer follows in the same stream, on the same state: no cancel, no second
+  request, no re-prefill. Greedy decoding at 100k+ of context can loop inside
+  the block and spend the whole `max_tokens` there; the model card's sampling
+  settings are the cure, this bounds the damage. Unset, nothing changes.
+  `/health` reports `max_thinking_tokens_default`.
+- **A floating `:latest` tag** on the container image, from this release on
+  (issue #55, @brzewVCE). The README and compose file stay pinned; `/health`
+  reports whether the front end and engine versions match.
+
+### Documentation
+
+- README: slots cap admission and extra clients queue rather than dilute,
+  with @eemin's sweep from issue #51; the cache's two entries per
+  conversation and when to raise `HALOGEN_CACHE_ENTRIES`; the thinking
+  budget beside the sampling settings.
+
 ## 0.8.0
 
 ### Added

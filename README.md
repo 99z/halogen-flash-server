@@ -103,7 +103,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.8.0
+  ghcr.io/peonist-ai/halogen-flash-server:0.8.1
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -127,7 +127,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.8.0
+  ghcr.io/peonist-ai/halogen-flash-server:0.8.1
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -261,6 +261,17 @@ are `minimal`, `low`, `medium`, `high` and `xhigh`; the model's own default is
 `xhigh`. `"reasoning_effort": "none"` turns thinking off for that request
 (the same as `chat_template_kwargs: {"enable_thinking": false}`, and
 `reasoning: {"effort": "none"}` on `/v1/responses`).
+
+**A thinking budget, since 0.8.1.** `"max_thinking_tokens": N` on a request
+(or `HALOGEN_MAX_THINKING_TOKENS` as the server default; the request wins)
+bounds the think block: if the model has not closed it after N generated
+tokens, the server closes it (Qwen's own budget sentence, then `</think>`)
+and the answer follows in the same stream, on the same state, with no second
+request. The `max_tokens` budget still covers both. This exists because
+greedy decoding at 100k+ of context can loop inside the block and spend the
+whole budget there (issue #56: 32,000 tokens of reasoning and an empty
+answer); the model card's sampling settings above are the cure, and the
+budget bounds the damage when a client sends none. Unset, nothing changes.
 
 **Any of three field names works**, and they mean the same thing here:
 `max_completion_tokens` (current OpenAI Chat Completions), `max_output_tokens`
@@ -609,8 +620,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.8.0 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.8.0 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.8.1 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.8.1 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -750,7 +761,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -e HALOGEN_CHECKPOINT=/models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
   -v ~/gguf-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.8.0
+  ghcr.io/peonist-ai/halogen-flash-server:0.8.1
 ```
 
 Name any shard of a split; the siblings are found by name. With
@@ -969,7 +980,14 @@ way to get one token per stream on this hardware.
 `HALOGEN_KV_SLOTS` past four trades what each client sees for admitting more
 clients at once instead of queueing them; past eight the total stops growing.
 Four is the default because it keeps per-stream speed where the numbers in
-this document were measured.
+this document were measured. Slots cap admission: a client past the count
+queues rather than diluting the batch, so with five workers on four slots
+each admitted stream still decodes at the four-stream rate and the fifth
+waits. A reporter's sweep on a five-worker aider fleet (issue #51) read the
+per-turn wall at 42 s on four slots against 46 on three and 52 on two, and
+14.9 t/s per stream on eight slots against 18.7 on four; for reply-heavy,
+cache-hostile clients the default is the right setting even when more slots
+would fit.
 
 Two other things the scheduler does for you. A prompt that arrives while other
 conversations are generating is read in pieces with a generation step for the
@@ -987,10 +1005,17 @@ holds the others back; prompt lookup rides with it and follows the same rule.
 
 The prompt cache keeps eight entries (`HALOGEN_CACHE_ENTRIES`), two per
 conversation: one at the end of its system prompt and one at the end of its
-history. Conversations taking turns each resume from their own state, and
-requests that share a system prompt and ask different things, together or in
-turn, resume from it as well. The server prints the memory budget at startup
-and warns before the allocator refuses.
+history. Since 0.8.1 those two are all a conversation ever holds: each turn
+replaces the previous turn's history entry rather than adding one, so a long
+tool-calling session cannot push other sessions out (before that, eight
+tool calls in one session evicted every other conversation, issue #54; the
+count shows as `superseded` on `/cache`). Conversations taking turns each
+resume from their own state, and requests that share a system prompt and ask
+different things, together or in turn, resume from it as well. More than
+four deep conversations at once wants `HALOGEN_CACHE_ENTRIES` raised to two
+per conversation (about 111 MiB of host RAM each, and the KV rows an entry
+covers stay reserved while it exists). The server prints the memory budget
+at startup and warns before the allocator refuses.
 
 `HALOGEN_MAX_TOK` (default 32,768, capped at the context) is the widest single
 prefill call, which sizes a ~4 GB scratch arena. Longer prompts are prefilled
