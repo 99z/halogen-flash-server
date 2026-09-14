@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.9.0
+
+### Added
+
+- **Composable context, opt-in** (`HALOGEN_COMPOSABLE_CONTEXT=1`, off by
+  default). A model whose past is read only through the
+  attention KV rows and the Gated DeltaNet state, and whose DeltaNet update
+  is affine, lets a whole message be reduced to one transition per head per
+  layer plus its rows, and that transition COMPOSED onto a later state and the
+  rows moved to a new offset instead of prefilling the message again. With the
+  flag on, message units at or above `HALOGEN_COMPOSABLE_CONTEXT_FLOOR`
+  (default 2048 tokens) are extracted as they prefill and kept in a host store
+  (`HALOGEN_COMPOSABLE_CONTEXT_BYTES`, default 4 GiB, LRU); a later request
+  that repeats a stored message at any offset behind the same system prompt
+  composes it. The use case is harness compaction: a transcript whose head is
+  replaced by a summary and whose tool results are kept verbatim re-prefills
+  only the summary and the new turn, so the first token after a compaction
+  arrives in a couple of seconds instead of after a full re-prefill. Needs the
+  prompt cache (`HALOGEN_PROMPT_CACHE=2`) and the KV pool (`HALOGEN_KV_POOL=1`);
+  refuses image requests. **Not the prompt cache and not bitwise:** a composed
+  answer is about one quantization step from the prefilled one (retrieval holds
+  at the prefill's rate in the measurement), and even with no
+  composition the message-boundary prefill split moves the answer the way a
+  cache-resume seam does. With the flag off nothing changes and every
+  byte-identical guarantee stands. `/health.composable_context` reports it; the
+  finish line names how many chunks a request composed.
+
 ## 0.8.1
 
 ### Fixed

@@ -84,7 +84,8 @@ GGUF](#bring-your-own-gguf) for which files, and for the numbers.
 - **[Configuration](#configuration)**: every setting worth knowing, plus
   [cache modes](#choosing-a-cache-mode),
   [context and memory](#context-and-memory-one-kv-pool-several-conversations)
-  and [1M context](#1m-context-opt-in-and-a-different-configuration)
+  and [1M context](#1m-context-opt-in-and-a-different-configuration),
+  [composable context](#composable-context-an-opt-in-preview)
 - **[Troubleshooting](#troubleshooting)**:
   [will not start](#if-the-server-will-not-start-out-of-memory),
   [starts but crawls](#if-the-server-starts-but-crawls-on-long-prompts),
@@ -103,7 +104,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.8.1
+  ghcr.io/peonist-ai/halogen-flash-server:0.9.0
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -127,7 +128,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.8.1
+  ghcr.io/peonist-ai/halogen-flash-server:0.9.0
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -620,8 +621,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.8.1 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.8.1 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.9.0 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.9.0 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -761,7 +762,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -e HALOGEN_CHECKPOINT=/models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
   -v ~/gguf-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.8.1
+  ghcr.io/peonist-ai/halogen-flash-server:0.9.0
 ```
 
 Name any shard of a split; the siblings are found by name. With
@@ -1056,6 +1057,50 @@ on the same machine as the table above:
   22-24 minutes cold. A 262,144-token prompt decodes at ~28. The context
   must leave room for the generation: a prompt at exactly the context is
   refused.
+
+### Composable context: an opt-in preview
+
+An agent harness eventually **compacts** a conversation: it replaces the early
+turns with a short summary and keeps the recent tool results verbatim, so the
+context fits. Today that costs a full re-prefill of everything after the
+system prompt, because the kept results now sit at new positions. Composable
+context removes that cost for the kept results, and it is off unless you ask:
+
+```
+-e HALOGEN_COMPOSABLE_CONTEXT=1
+```
+
+With it on, each message at or above `HALOGEN_COMPOSABLE_CONTEXT_FLOOR`
+(default 2048 tokens) is retained in a host store
+(`HALOGEN_COMPOSABLE_CONTEXT_BYTES`, default 4 GiB, least-recently-used) as it
+is first read. When a later request repeats that message at any offset behind
+the same system prompt, the server reuses the retained work instead of reading
+it again. On the test machine a compaction that kept ~8,700 tokens of tool
+results was restored in about 0.13 s where reading them fresh costs ~14 s, and
+the finish line reports `composed 5 chunks`.
+
+It needs the resume-anywhere prompt cache and the KV pool, which are the
+serving defaults (`HALOGEN_PROMPT_CACHE=2`, `HALOGEN_KV_POOL=1`); it refuses
+image requests. `/health` reports it under `composable_context`.
+
+**It is not the prompt cache, and it is honest about that.** The prompt cache
+is exact: a resume is byte-identical to a fresh run. Composable context is not:
+a reused answer is very close to, but not identical to, the one you would get
+by reading the text fresh, and quality is otherwise unchanged (retrieval in
+testing held at the same rate as reading fresh). That is why it is opt-in and
+its own switch. **With the flag off, nothing changes and every byte-identical
+guarantee above still holds.**
+
+This is a preview, and the flag and defaults may change. On the roadmap for it:
+
+- **closer to exact** — narrowing the small difference between a reused answer
+  and reading the text fresh;
+- **broader reuse** — reusing material across separate sessions and
+  sub-agents working the same files, not only within one conversation's
+  compaction;
+- **a smaller footprint and a durable store** — less memory per retained
+  message, and an optional on-disk store that survives a restart and holds
+  far more than the in-memory one.
 
 ---
 
