@@ -105,7 +105,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.9.1
+  ghcr.io/peonist-ai/halogen-flash-server:0.10.0
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -129,7 +129,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.9.1
+  ghcr.io/peonist-ai/halogen-flash-server:0.10.0
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -622,8 +622,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.9.1 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.9.1 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.10.0 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.10.0 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -766,7 +766,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -e HALOGEN_CHECKPOINT=/models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
   -v ~/gguf-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.9.1
+  ghcr.io/peonist-ai/halogen-flash-server:0.10.0
 ```
 
 Name any shard of a split; the siblings are found by name. With
@@ -1027,6 +1027,52 @@ prefill call, which sizes a ~4 GB scratch arena. Longer prompts are prefilled
 in pieces. Do not raise it to the native context. That allocation does not
 fit, and the server will not start.
 
+### Prompt cache on disk: resume a conversation after a restart
+
+By default the prompt cache lives in memory: it makes a follow-up turn in the
+same running server resume where the last one stopped, but a restart loses it,
+and the next turn re-reads the whole conversation. Point `HALOGEN_CACHE_DIR` at
+a directory and the cache also lands on disk, so a conversation survives a
+restart:
+
+```
+HALOGEN_CACHE_DIR=/cache
+```
+
+Each turn, the server writes only that turn's new attention rows behind the
+request (nothing on the request's own path waits for it), and a request that
+is no longer in memory is restored from disk instead of re-read. On the test
+machine a 32k-token conversation, its server stopped and started, reached its
+first token in a few seconds against about 40 seconds of cold prefill.
+
+What it stores is about 27 KiB per token of context: 0.9 GB at 32k, 2.7 GB at
+100k, 7.2 GB at 262k. `HALOGEN_CACHE_DISK_GIB` bounds the directory (default
+64; the least recently used conversations are removed first; `0` is
+unbounded). The directory must be on a real filesystem that accepts direct
+I/O; a tmpfs or an overlay is refused with a message, and the cache stays in
+memory only.
+
+Two things worth knowing:
+
+- **It is exact.** A conversation restored from disk continues from the same
+  attention state it was saved with, byte for byte across the restart; it is
+  the same "resume anywhere" cache as in memory, not a re-read.
+- **The write rate falls as the pool fills.** Saving a turn's rows copies them
+  out of device memory, and near the memory ceiling that copy slows (from
+  several GB/s when the pool is a third full to a few hundred MB/s when it is
+  near the top). Because the write is behind the request it does not slow the
+  answer, but a machine that keeps very long conversations (past ~64k tokens)
+  warm across restarts should shrink the resident pool with
+  `HALOGEN_KV_POOL_POSITIONS=262144`, which keeps the copy at the drive's
+  rate. For ordinary chat and agent sessions at the default pool the write is
+  several GB/s and this does not arise.
+
+Each distinct configuration keeps its own files, keyed to the exact engine
+build, weights, context, and every setting that changes the saved bytes, so a
+different build or setting never restores another's state; the others are kept
+untouched. Stopping the server flushes the last turn before it exits, so give
+it a moment to stop (the bundled compose sets a 60-second stop grace period).
+
 ### 1M context: opt-in, and a different configuration
 
 The model card extends the native 262,144 to 1M by static YaRN (factor 4),
@@ -1088,7 +1134,7 @@ default beside each arm in the same session:
 | perplexity, prose / code / agentic transcript | | +0.1% / +0.3% / −0.4% | +0.5% / +0.3% / +1.1% |
 | prefill 8,192 tokens | 1,271 tok/s | −4.5% | −4.5% |
 | prefill 32,768 tokens | 1,426 tok/s | −6.7% | −19% |
-| decode at 32k, serial / with the draft head | 34.5 / 36.7 tok/s | −2.3% / −3.4% | −4.5% / −10% |
+| decode at 32k, serial / with the draft head | 34.5 / 36.3 tok/s | −2.3% / −2.8% | −4.5% / −7.9% |
 
 At 4096 the two misses of the default's battery (the `16,384` row above, both
 the same needle) retrieve, and one different case is cut off at the end-of-turn

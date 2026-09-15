@@ -12,7 +12,7 @@
 #   podman run --rm -it --device /dev/kfd --device /dev/dri \
 #     --group-add keep-groups --ipc=host --ulimit memlock=-1:-1 \
 #     -v /path/to/halogen-models:/models:ro \
-#     -p 8731:8731 ghcr.io/peonist-ai/halogen-flash-server:0.9.1
+#     -p 8731:8731 ghcr.io/peonist-ai/halogen-flash-server:0.10.0
 #
 # ONE VOLUME IS ENOUGH. The weights repo ships the tokenizer inside it, and
 # both services below read it from there. Set HALOGEN_MODELS to the directory
@@ -40,7 +40,7 @@
 # both, but the fix is this file: one tag, changed in both places.
 services:
   engine:
-    image: ghcr.io/peonist-ai/halogen-flash-server:0.9.1
+    image: ghcr.io/peonist-ai/halogen-flash-server:0.10.0
     command: ["engine"]
     environment:
       # Separate netns from the api service, so the engine must listen on all
@@ -93,10 +93,23 @@ services:
       # numbers.
       # HALOGEN_CHECKPOINT: /models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf
       # HALOGEN_GGUF_CACHE: "1"
+      #
+      # THE PROMPT CACHE ON DISK (0.10.0). Point this at a directory on a real
+      # filesystem (it takes O_DIRECT; a tmpfs cannot hold it) and every
+      # conversation's KV rows are written behind the request as it grows;
+      # after a restart, a follow-up turn resumes from the drive instead of
+      # re-prefilling the conversation. 27 KiB a token: 0.9 GB at 32k, 7.2 GB
+      # at 262k. HALOGEN_CACHE_DISK_GIB (default 64) bounds the directory,
+      # least recently used conversations out. See the README's "Prompt cache
+      # on disk" section, and stop_grace_period below.
+      # HALOGEN_CACHE_DIR: /cache
+      # HALOGEN_CACHE_DISK_GIB: "64"
     volumes:
       # The directory `hf download` wrote. It holds the checkpoint, the quality
       # sidecar the engine picks up automatically, and tokenizer/.
       - ${HALOGEN_MODELS:?set HALOGEN_MODELS to the directory hf download wrote}:/models:ro
+      # The prompt cache's disk tier, if HALOGEN_CACHE_DIR is set above:
+      # - ${HALOGEN_CACHE:-./halogen-cache}:/cache
     devices:
       - /dev/kfd
       - /dev/dri
@@ -130,10 +143,15 @@ services:
       timeout: 35s
       retries: 3
       start_period: 20m
+    # A stop sends SIGTERM and, 10 s later by default, SIGKILL. The engine
+    # finishes writing the last turn's rows to the disk tier on SIGTERM
+    # (usually well under a second; a 262k first turn on a slow drive can
+    # take longer), so give it a minute rather than lose that turn.
+    stop_grace_period: 60s
     restart: unless-stopped
 
   api:
-    image: ghcr.io/peonist-ai/halogen-flash-server:0.9.1
+    image: ghcr.io/peonist-ai/halogen-flash-server:0.10.0
     command: ["api"]
     depends_on:
       engine:

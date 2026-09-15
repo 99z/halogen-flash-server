@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.10.0
+
+### Added
+
+- **Prompt cache on disk** (`HALOGEN_CACHE_DIR`, off by default; issue #40
+  @D-revv, #4). The resume-anywhere prompt cache now also persists to a
+  directory, so a conversation survives a server restart instead of being
+  re-read from the start. Each turn's new attention rows are written behind
+  the request (nothing on the request path waits), and a request no longer in
+  memory is restored from disk: on the test machine a 32k conversation
+  resumed across a stop/start in a few seconds against about 40 s of cold
+  prefill. About 27 KiB per token (0.9 GB at 32k, 7.2 GB at 262k);
+  `HALOGEN_CACHE_DISK_GIB` bounds the directory (default 64, least recently
+  used conversations out). Restore from disk is exact (byte-identical to the
+  in-memory resume across the restart). Each build/weights/setting keeps its
+  own files and never restores another's. Needs a filesystem that accepts
+  direct I/O (a tmpfs or overlay is refused, the cache staying in memory).
+  The bundled compose sets a 60-second stop grace period so the last turn is
+  flushed. See the README's "Prompt cache on disk" section.
+
 ## 0.9.1
 
 ### Added
