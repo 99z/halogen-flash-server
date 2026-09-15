@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.10.2
+
+### Fixed
+
+- **A non-streaming request now stops when its client disconnects**
+  (issue #58, @dabblingwithcode). Streaming requests have been cancelled on
+  disconnect since 0.5.7; a non-streaming one ran to its natural end (EOS,
+  `max_tokens` or the thinking budget) holding its slot, which is what
+  `in_flight: 1` for 150 s after the client had exited was. On every route
+  the connection is now watched once per token; on a disconnect the
+  generation is cancelled within a step, the slot and KV reservation are
+  released, `/health` and `/metrics` show it at once, and the log prints a
+  "client disconnected mid-request" line with the count dropped. The README's
+  cancellation passage says all of this.
+- **Several leading system messages render as one** (issue #60, @suvayu).
+  The model's chat template accepts a single `system` message and only as
+  the first, and refused `opencode`'s prompt, which older builds send as two
+  system messages. `/v1/chat/completions` now merges a leading run of
+  `system`/`developer` messages (strings or text parts) into one, as
+  `/v1/responses` already did. A system message after a user or assistant
+  turn is still refused, now with its position named.
+
+### Documentation
+
+- `docs/FLAGS.md` lists `HALOGEN_CACHE_DIR`, `HALOGEN_CACHE_DISK_GIB` and the
+  three `HALOGEN_COMPOSABLE_CONTEXT*` flags, which the README named and the
+  flag list did not; its "every flag is byte-identical except" note now also
+  names `HALOGEN_INDEXER_BUDGET` and `HALOGEN_COMPOSABLE_CONTEXT`. The
+  composable-context section says its store is in the server's memory, not
+  on disk, and gone at restart.
+
 ## 0.10.1
 
 ### Fixed

@@ -105,7 +105,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.10.1
+  ghcr.io/peonist-ai/halogen-flash-server:0.10.2
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -129,7 +129,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.10.1
+  ghcr.io/peonist-ai/halogen-flash-server:0.10.2
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -622,8 +622,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.10.1 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.10.1 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.10.2 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.10.2 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -766,7 +766,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -e HALOGEN_CHECKPOINT=/models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
   -v ~/gguf-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.10.1
+  ghcr.io/peonist-ai/halogen-flash-server:0.10.2
 ```
 
 Name any shard of a split; the siblings are found by name. With
@@ -1166,8 +1166,8 @@ context removes that cost for the kept results, and it is off unless you ask:
 
 With it on, each message at or above `HALOGEN_COMPOSABLE_CONTEXT_FLOOR`
 (default 2048 tokens) is retained in a host store
-(`HALOGEN_COMPOSABLE_CONTEXT_BYTES`, default 4 GiB, least-recently-used) as it
-is first read. When a later request repeats that message at any offset behind
+(`HALOGEN_COMPOSABLE_CONTEXT_BYTES`, default 4 GiB, least-recently-used; in
+the server's memory, not on disk, and gone at restart) as it is first read. When a later request repeats that message at any offset behind
 the same system prompt, the server reuses the retained work instead of reading
 it again. On the test machine a compaction that kept ~8,700 tokens of tool
 results was restored in about 0.13 s where reading them fresh costs ~14 s, and
@@ -1369,7 +1369,14 @@ cat /proc/cmdline
   to pay only for exactly two code-heavy streams and is not built.
 - **No response store.** `/v1/responses` generates and streams; it does not
   keep responses, so `previous_response_id`, retrieval by id and cancellation
-  are not available.
+  by id are not available. **Cancellation is by disconnect** (since 0.10.2;
+  #58): on every route, streaming or not, a request whose client closes the
+  connection is cancelled within one decode step, its slot and KV
+  reservation are released, and `/health.in_flight` and `/metrics` show it
+  at once; the server log prints a "client disconnected" line with the
+  timing. Its prefix stays in the prompt cache, so a retry resumes from it.
+  Before 0.10.2 only streaming requests were cancelled; a non-streaming
+  request ran to its natural end (EOS, `max_tokens` or the thinking budget).
 - **Images are read, not generated.** There is no image output, and no audio
   or video input.
 - **One GPU, one model family.** gfx1151 only. The build hard-rejects other
