@@ -1,31 +1,46 @@
 # Changelog
 
+## 0.9.1
+
+### Added
+
+- **`HALOGEN_INDEXER_BUDGET`: the model's sparse-attention budget, raisable at
+  startup** (issue #57, @KaiFelixBennett). The checkpoint attends the top 512
+  blocks (2,048 tokens) of the context per query; that value is the default
+  and the byte-identical path. Set to 4096 (any value 2048–8192, rounded down
+  to a multiple of 16) the model attends a superset of what it was trained on,
+  which is a different configuration: in the README's retrieval battery
+  (16k + 32k rows, 96 cases) 4096 read 95/96 against the default's 94/96,
+  recovering both of the default's misses, for 4.5% / 6.7% of prefill at
+  8k / 32k and about 2% of decode; perplexity moved within noise on prose,
+  code and an agentic transcript. 8192 read 96/96 at a consistent perplexity
+  cost and 19% of prefill. Printed at startup, on the INFO line, and at
+  `/health.indexer_budget`; speculative decoding stays byte-identical to
+  serial at every budget. The README's "Attention budget" section has the
+  table.
+
 ## 0.9.0
 
 ### Added
 
-- **Composable context, opt-in** (`HALOGEN_COMPOSABLE_CONTEXT=1`, off by
-  default). A model whose past is read only through the
-  attention KV rows and the Gated DeltaNet state, and whose DeltaNet update
-  is affine, lets a whole message be reduced to one transition per head per
-  layer plus its rows, and that transition COMPOSED onto a later state and the
-  rows moved to a new offset instead of prefilling the message again. With the
-  flag on, message units at or above `HALOGEN_COMPOSABLE_CONTEXT_FLOOR`
-  (default 2048 tokens) are extracted as they prefill and kept in a host store
-  (`HALOGEN_COMPOSABLE_CONTEXT_BYTES`, default 4 GiB, LRU); a later request
-  that repeats a stored message at any offset behind the same system prompt
-  composes it. The use case is harness compaction: a transcript whose head is
-  replaced by a summary and whose tool results are kept verbatim re-prefills
-  only the summary and the new turn, so the first token after a compaction
-  arrives in a couple of seconds instead of after a full re-prefill. Needs the
+- **Composable context, opt-in preview** (`HALOGEN_COMPOSABLE_CONTEXT=1`, off
+  by default). With the flag on, each message at or above
+  `HALOGEN_COMPOSABLE_CONTEXT_FLOOR` (default 2048 tokens) is retained in a
+  host store (`HALOGEN_COMPOSABLE_CONTEXT_BYTES`, default 4 GiB, LRU) as it is
+  first read; when a later request repeats that message at any offset behind
+  the same system prompt, the server reuses the retained work instead of
+  reading it again. The use case is harness compaction: a transcript whose head
+  is replaced by a summary and whose tool results are kept verbatim reads only
+  the summary and the new turn fresh, so the first token after a compaction
+  arrives in a couple of seconds instead of after a full re-read. Needs the
   prompt cache (`HALOGEN_PROMPT_CACHE=2`) and the KV pool (`HALOGEN_KV_POOL=1`);
-  refuses image requests. **Not the prompt cache and not bitwise:** a composed
-  answer is about one quantization step from the prefilled one (retrieval holds
-  at the prefill's rate in the measurement), and even with no
-  composition the message-boundary prefill split moves the answer the way a
-  cache-resume seam does. With the flag off nothing changes and every
-  byte-identical guarantee stands. `/health.composable_context` reports it; the
-  finish line names how many chunks a request composed.
+  refuses image requests. **Not the prompt cache and not byte-identical:** a
+  reused answer is very close to, but not identical to, the one you would get
+  by reading the text fresh (retrieval in testing held at the same rate); with
+  the flag off nothing changes and every byte-identical guarantee stands. A
+  preview: expect it to get more accurate and broader in later releases.
+  `/health.composable_context` reports it; the finish line names how many
+  chunks a request reused.
 
 ## 0.8.1
 

@@ -85,6 +85,7 @@ GGUF](#bring-your-own-gguf) for which files, and for the numbers.
   [cache modes](#choosing-a-cache-mode),
   [context and memory](#context-and-memory-one-kv-pool-several-conversations)
   and [1M context](#1m-context-opt-in-and-a-different-configuration),
+  [attention budget](#attention-budget-opt-in-and-a-different-configuration),
   [composable context](#composable-context-an-opt-in-preview)
 - **[Troubleshooting](#troubleshooting)**:
   [will not start](#if-the-server-will-not-start-out-of-memory),
@@ -104,7 +105,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.9.0
+  ghcr.io/peonist-ai/halogen-flash-server:0.9.1
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -128,7 +129,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.9.0
+  ghcr.io/peonist-ai/halogen-flash-server:0.9.1
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -621,8 +622,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.9.0 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.9.0 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.9.1 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.9.1 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -662,7 +663,10 @@ depths from 1,024 to 32,768 tokens.
 | **total** | **148/150 = 98.7%** |
 
 The two misses confabulate a plausible-looking code rather than trailing off.
-The test can fail, and does. The 1,024 depth is the control: below the
+The test can fail, and does. Since 0.9.1 those two misses are known to be the
+attention budget's: at `HALOGEN_INDEXER_BUDGET=4096` both retrieve
+([Attention budget](#attention-budget-opt-in-and-a-different-configuration)).
+The 1,024 depth is the control: below the
 attention selection budget the sparse path is not engaged, so it exercises the
 same dense attention the fixture gate already covers. Every depth above it runs
 block selection live, which no short fixture can reach.
@@ -762,7 +766,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -e HALOGEN_CHECKPOINT=/models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
   -v ~/gguf-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.9.0
+  ghcr.io/peonist-ai/halogen-flash-server:0.9.1
 ```
 
 Name any shard of a split; the siblings are found by name. With
@@ -1057,6 +1061,50 @@ on the same machine as the table above:
   22-24 minutes cold. A 262,144-token prompt decodes at ~28. The context
   must leave room for the generation: a prompt at exactly the context is
   refused.
+
+### Attention budget: opt-in, and a different configuration
+
+The model's sparse attention scores every 4-token block of the context with a
+small indexer and attends the top 512 blocks (2,048 tokens) per query; the
+checkpoint's config sets that budget and this server runs it by default. It can
+be raised at startup, and it is off unless you ask:
+
+```
+HALOGEN_INDEXER_BUDGET=4096
+```
+
+Unset, or set to 2048, nothing changes (byte-identical). Set higher, it is a
+different model configuration, not a cache setting: every query past the budget
+attends a superset of what the checkpoint was trained to attend, so the answer
+to a long prompt is not the same answer. Accepted values are 2048 to 8192,
+rounded down to a multiple of 16; the effective value is printed at startup and
+reported by `/health` as `indexer_budget`. It is static for the server's life.
+What it buys and costs, measured on the same machine as the tables above, the
+default beside each arm in the same session:
+
+| | 2048 (default) | 4096 | 8192 |
+|---|---|---|---|
+| retrieval battery, 16k + 32k rows, 96 cases | 94/96 | 95/96 | 96/96 |
+| perplexity, prose / code / agentic transcript | | +0.1% / +0.3% / −0.4% | +0.5% / +0.3% / +1.1% |
+| prefill 8,192 tokens | 1,271 tok/s | −4.5% | −4.5% |
+| prefill 32,768 tokens | 1,426 tok/s | −6.7% | −19% |
+| decode at 32k, serial / with the draft head | 34.5 / 36.7 tok/s | −2.3% / −3.4% | −4.5% / −10% |
+
+At 4096 the two misses of the default's battery (the `16,384` row above, both
+the same needle) retrieve, and one different case is cut off at the end-of-turn
+token; perplexity moves within noise, with a structure worth knowing: the
+hardest predictions get better and the easy ones (verbatim copying) a little
+worse, most visibly on agentic transcripts. At 8192 every planted fact
+retrieves, but perplexity is a consistent cost on all three corpora and prefill
+pays a fifth. Speculative decoding stays byte-identical to serial at every
+budget. The cost is the attention kernel gathering more keys per query; nothing
+else in the pass changes.
+
+If your workload is long-context lookup (a fact buried in a large document or
+transcript, asked about much later) and you can spare 7% of prefill, 4096 is the
+setting to try; measure it on your own prompts, because the retrieval battery
+is a retrieval test and not a general one. Reported as
+[issue #57](https://github.com/peonist-ai/halogen-flash-server/issues/57).
 
 ### Composable context: an opt-in preview
 

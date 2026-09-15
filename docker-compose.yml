@@ -12,7 +12,7 @@
 #   podman run --rm -it --device /dev/kfd --device /dev/dri \
 #     --group-add keep-groups --ipc=host --ulimit memlock=-1:-1 \
 #     -v /path/to/halogen-models:/models:ro \
-#     -p 8731:8731 ghcr.io/peonist-ai/halogen-flash-server:0.9.0
+#     -p 8731:8731 ghcr.io/peonist-ai/halogen-flash-server:0.9.1
 #
 # ONE VOLUME IS ENOUGH. The weights repo ships the tokenizer inside it, and
 # both services below read it from there. Set HALOGEN_MODELS to the directory
@@ -40,7 +40,7 @@
 # both, but the fix is this file: one tag, changed in both places.
 services:
   engine:
-    image: ghcr.io/peonist-ai/halogen-flash-server:0.9.0
+    image: ghcr.io/peonist-ai/halogen-flash-server:0.9.1
     command: ["engine"]
     environment:
       # Separate netns from the api service, so the engine must listen on all
@@ -62,6 +62,14 @@ services:
       # see the README's "1M context" section before uncommenting these.
       # HALOGEN_ROPE_YARN: "4"
       # HALOGEN_CTX: "1048576"
+      #
+      # The attention budget: how many tokens of the context each query
+      # attends through the model's sparse attention. The checkpoint's value
+      # is 2048 and is the default. 4096 retrieved two more of 96 planted
+      # facts at 16k in the README's battery for about 7% of prefill speed
+      # at 32k and 2% of decode; it is a different model configuration, not
+      # byte-identical. See the README's "Attention budget" section.
+      # HALOGEN_INDEXER_BUDGET: "4096"
       #
       # IMAGES ARE OFF UNTIL THIS IS SET, and unset is the shipped state: with
       # no tower the engine never builds one, allocates nothing for it, and
@@ -125,7 +133,7 @@ services:
     restart: unless-stopped
 
   api:
-    image: ghcr.io/peonist-ai/halogen-flash-server:0.9.0
+    image: ghcr.io/peonist-ai/halogen-flash-server:0.9.1
     command: ["api"]
     depends_on:
       engine:
