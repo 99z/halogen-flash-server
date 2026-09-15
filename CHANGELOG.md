@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.11.0
+
+### Fixed
+
+- **A side turn no longer evicts the point a conversation continues from**
+  (issue #61, @GavinAstk). oh-my-pi's idle recap sends the whole history plus
+  a question and then drops that turn from its history, so the next real
+  turn continues from where the recap branched. Since 0.8.1 a conversation
+  kept one history entry in the prompt cache, the newest, and the recap's
+  store replaced the one the conversation needed; the next turn matched only
+  the system prompt (`161006 cached` → `19528 cached`, a 146k-token
+  re-prefill, 179 s), and every recap after the first did the same. A
+  conversation now keeps its two most recently *used* history entries
+  beside the system-prompt entry; the side turn hits and refreshes the true
+  one, and the next real turn hits it again. `HALOGEN_CACHE_ENTRIES`
+  defaults to 12 (three per conversation) instead of 8.
+- **The KV pool no longer forgets what the request it is making room for is
+  about to use** (issue #61). When the pool was full, the allocator dropped
+  the composable-context store's retained messages first, including the
+  ones the request's own plan was about to compose (a 146k re-prefill under
+  the flag whose purpose is that prefill), and then cache entries by global
+  age without sparing the entry the request had just matched, so a rarely
+  hit system-prompt entry could be dropped for its own request's region,
+  which read as a cold prefill with no line in the log (`170604` with no
+  `cached`, 203 s). Eviction is now by region, oldest first; the matched
+  entry is never dropped; a conversation whose only stale entries are dead
+  side turns grows its region in place instead of displacing another
+  conversation; and every eviction prints `kv pool: no room for N
+  positions; forgot ...` so a cold turn has a reason next to it.
+
+### Added
+
+- **Progress lines during a long prompt and a long answer** (issue #49,
+  @Bushido76). The engine log prints `flash_serve: req N prefill P/T tokens,
+  S s` at every 32,768-token chunk of a prompt and every 20 s inside one,
+  and `req N generated K tokens, S s` every 30 s of a generation, so a
+  160k-token compaction is visible while it runs rather than only in the
+  `serve_api:` line at its end.
+- **The answer room.** Thinking no longer consumes the whole `max_tokens`:
+  when a request sends no thinking budget, the think block is closed with
+  `max(1024, 15% of max_tokens)` tokens left for the answer (the same close
+  as `max_thinking_tokens`), so a capped request ends with content rather
+  than `finish_reason: "length"` and an empty `content`. Every agent harness
+  read for this release sends no thinking control to a custom endpoint
+  unless configured to, so the model's `xhigh` was running under whatever
+  cap the harness set for the answer: Pi caps a compaction at 13,107 tokens
+  and discards it on a length stop, hermes-agent persists nothing from one,
+  Cline logs `output_budget_consumed_by_reasoning`. `HALOGEN_THINKING_ANSWER_ROOM`
+  sets the room; `0` restores the previous behaviour; `/health` reports
+  `thinking_answer_room`. Only a request whose thinking would have run past
+  the line is affected.
+- **The harnesses' own names for the thinking controls are read**:
+  `thinking_budget_tokens`, `thinking_budget`, `thinking_token_budget` (the
+  three names Pi's `compat.thinkingTokenBudgetField` can send), the
+  `reasoning` object (`enabled`, `effort`, `max_tokens`: OpenRouter's shape,
+  sent by hermes-agent and aider) and the `thinking` object (`type`,
+  `budget_tokens`: Anthropic's shape, sent by aider's `--thinking-tokens`
+  and Kimi-style clients), on `/v1/chat/completions` and `/v1/responses`.
+  Two names with two values is a 400, as with the token budget. Before this
+  every one of them was silently dropped. `/health` lists them under
+  `supported`.
+
+### Documentation
+
+- A README section, *From an agent harness*: what Pi, oh-my-pi, opencode,
+  Codex CLI, hermes-agent, Cline, Roo Code and aider each send for thinking
+  to a custom OpenAI-compatible server (nothing, unless configured), and
+  the setting on each side that changes it.
+
 ## 0.10.2
 
 ### Fixed

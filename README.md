@@ -69,7 +69,8 @@ GGUF](#bring-your-own-gguf) for which files, and for the numbers.
 - **[Quickstart](#quickstart)**, then **[Using it](#using-it)**:
   [sampling](#sampling), [images](#images),
   [token budgets](#token-budgets-and-why-an-empty-answer-means-you-ran-out),
-  [Codex and the Responses API](#codex-and-the-responses-api)
+  [Codex and the Responses API](#codex-and-the-responses-api),
+  [from an agent harness](#from-an-agent-harness)
 - **[Give it a machine of its own](#give-it-a-machine-of-its-own)**: what this
   server holds, and what that leaves for anything else
 - **[Measured](#measured)**: prefill and decode,
@@ -105,7 +106,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.10.2
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.0
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -129,7 +130,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.10.2
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.0
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -248,10 +249,13 @@ under 256x256 is scaled up, which helps small text rather than hurting it. A
 ### Token budgets, and why an empty answer means you ran out
 
 **The token budget covers thinking, not just the answer.** This model reasons
-before it replies and those tokens count against the budget, so a budget that
-runs out mid-thought does not shorten the answer, it removes it: the reply comes
-back with `finish_reason: "length"`, an empty `content`, and the partial
-reasoning in `reasoning_content`, which most OpenAI clients do not display.
+before it replies and those tokens count against the budget. Before 0.11.0 a
+budget that ran out mid-thought did not shorten the answer, it removed it:
+the reply came back with `finish_reason: "length"`, an empty `content`, and
+the partial reasoning in `reasoning_content`, which most OpenAI clients do
+not display. Since 0.11.0 the server closes the think block with room left
+for the answer (the *answer room*, below), so that shape needs a request
+that asks for it (`HALOGEN_THINKING_ANSWER_ROOM=0`).
 
 The default is **8192**, which finished every ordinary prompt we measured with
 room to spare. Send more when you want more, up to `HALOGEN_MAX_TOKENS_CAP`
@@ -274,6 +278,33 @@ greedy decoding at 100k+ of context can loop inside the block and spend the
 whole budget there (issue #56: 32,000 tokens of reasoning and an empty
 answer); the model card's sampling settings above are the cure, and the
 budget bounds the damage when a client sends none. Unset, nothing changes.
+
+**The answer room, since 0.11.0.** Thinking no longer consumes the whole
+budget. When a request sends no thinking budget of its own, the server closes
+the think block once `max(1024, 15% of max_tokens)` tokens of the budget
+remain (the same close as `max_thinking_tokens`), so a capped request ends
+with an answer rather than `finish_reason: "length"` and an empty `content`.
+This matters because agent harnesses send no thinking control at all to an
+OpenAI-compatible server unless configured to, so the model's own `xhigh`
+runs under whatever cap the harness set for the *answer*: a compaction
+summary capped at 13,000 tokens that the model thinks past is a compaction
+that fails, and the harness retries it. A request's own budget still wins
+when it is smaller. `HALOGEN_THINKING_ANSWER_ROOM` sets the room in tokens;
+`0` restores the 0.10.x behaviour; `/health` reports it as
+`thinking_answer_room`. Only a request whose thinking would have run past
+the line is affected; every other reply is untouched.
+
+**Your harness's own name for the thinking controls works, since 0.11.0.**
+Besides `reasoning_effort`, `enable_thinking`, `chat_template_kwargs` and
+`max_thinking_tokens`, the chat route reads `thinking_budget_tokens`,
+`thinking_budget` and `thinking_token_budget` (the three names Pi's
+`compat.thinkingTokenBudgetField` can send), the `reasoning` object
+(`{"enabled": false}`, `{"effort": "low"}`, `{"max_tokens": 4096}`: the
+OpenRouter shape, which hermes-agent and aider send) and the `thinking`
+object (`{"type": "disabled"}`, `{"type": "enabled", "budget_tokens": 4096}`:
+the Anthropic shape, which aider's `--thinking-tokens` sends to every
+non-OpenRouter model). Two names with two different values is a 400, as
+with the token budget. `/health` lists them under `supported`.
 
 **Any of three field names works**, and they mean the same thing here:
 `max_completion_tokens` (current OpenAI Chat Completions), `max_output_tokens`
@@ -415,6 +446,45 @@ against the official `openai` Python SDK, which parses every event into its own
 typed models.
 
 ---
+
+### From an agent harness
+
+Every coding-agent harness we read (Pi, opencode, Codex CLI, hermes-agent,
+Cline, Roo Code, aider, oh-my-pi) follows the same sensible rule against an
+OpenAI-compatible server it was not written for: send nothing the server
+was not declared to accept. So none of them sends a thinking control unless
+you configure one, and most cannot express "thinking off" at all against a
+custom endpoint. Two consequences: **the server's defaults are what your
+harness runs at**, and a compaction (which six of the seven build as a new
+conversation, a cold prefill of the whole history under the harness's own
+output cap) runs at the model's `xhigh` effort. The [answer
+room](#token-budgets-and-why-an-empty-answer-means-you-ran-out) keeps that
+from failing; these are the switches if you want it faster:
+
+| harness | what it sends for thinking on a custom endpoint | to set effort or turn thinking off |
+|---|---|---|
+| **Pi** | `reasoning_effort` only with `"reasoning": true` in the model entry and a level other than off; nothing when off | `"reasoning": true, "thinkingLevelMap": {"off": "none"}` in the entry; a budget through `compat.thinkingTokenBudgetField: "thinking_budget"` (any of its three names works here) |
+| **oh-my-pi** | as Pi: nothing when off | its own effort-map keys on the model entry, or the server variables |
+| **opencode** | `reasoning_effort` low/medium/high when a variant is picked; no off variant for a custom provider | pick a variant, or `HALOGEN_REASONING_EFFORT` / `HALOGEN_ENABLE_THINKING=0` on the server |
+| **Codex CLI** | `reasoning.effort` on `/v1/responses` only when `model_reasoning_effort` is set | `model_reasoning_effort = "medium"` in `config.toml` |
+| **hermes-agent** | nothing to a custom base URL (its `reasoning_effort` setting reaches OpenRouter, Nous, LM Studio, Ollama and GitHub only) | the server variables; for the compaction summary, `extra_body: {enable_thinking: false}` under its auxiliary settings |
+| **Cline** | `reasoning_effort` when set; "off" sends nothing outside its portable-provider list | set an effort, or the server variables |
+| **Roo Code** | `reasoning_effort` (`none`..`high`) when the model info advertises reasoning effort; `disable` sends nothing | enable reasoning effort on the model and pick a level |
+| **aider** | `--reasoning-effort` as `reasoning_effort`; `--thinking-tokens N` as `thinking: {budget_tokens}` | either flag; both are read here |
+
+The server variables are `HALOGEN_REASONING_EFFORT` (the effort a request
+gets when it names none; the card's advice is to leave it at `xhigh` for
+agentic work), `HALOGEN_ENABLE_THINKING=0` (thinking off unless a request
+turns it on) and `HALOGEN_MAX_THINKING_TOKENS` (a budget for requests that
+send none). A request that names any of these wins over the variable.
+
+**What the log says during a long turn, since 0.11.0.** The container log
+prints `flash_serve: req N prefill P/T tokens, S s` at every 32,768-token
+chunk of a long prompt and every 20 s inside one, and `req N generated K
+tokens, S s` every 30 s of a long answer, so a 160k-token compaction that
+takes minutes is visible while it runs rather than only in the `serve_api:`
+line at its end. `/health` reports `busy_for_s` while a request is in
+flight.
 
 ## Give it a machine of its own
 
@@ -622,8 +692,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.10.2 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.10.2 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.0 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.0 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -766,7 +836,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -e HALOGEN_CHECKPOINT=/models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
   -v ~/gguf-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.10.2
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.0
 ```
 
 Name any shard of a split; the siblings are found by name. With
@@ -1008,19 +1078,36 @@ drafter, which is the default, speculates while it is the only conversation
 generating and joins the batch as soon as another one is active, so it never
 holds the others back; prompt lookup rides with it and follows the same rule.
 
-The prompt cache keeps eight entries (`HALOGEN_CACHE_ENTRIES`), two per
-conversation: one at the end of its system prompt and one at the end of its
-history. Since 0.8.1 those two are all a conversation ever holds: each turn
-replaces the previous turn's history entry rather than adding one, so a long
-tool-calling session cannot push other sessions out (before that, eight
-tool calls in one session evicted every other conversation, issue #54; the
-count shows as `superseded` on `/cache`). Conversations taking turns each
-resume from their own state, and requests that share a system prompt and ask
+The prompt cache keeps twelve entries (`HALOGEN_CACHE_ENTRIES`), three per
+conversation: one at the end of its system prompt and two at ends of its
+history. Since 0.8.1 a conversation holds a fixed number of entries: a new
+turn's history entry replaces an older one rather than adding to the list,
+so a long tool-calling session cannot push other sessions out (before that,
+eight tool calls in one session evicted every other conversation, issue #54;
+the count shows as `superseded` on `/cache`). Since 0.11.0 it keeps the two
+most recently *used* history entries, not the newest two, because of a
+client pattern that the newest-only rule broke (issue #61): a harness that
+sends the whole history plus a side question (oh-my-pi's idle recap does)
+and then drops that turn from its history continues from where the side
+turn branched, and with only the newest entry kept that point was gone and
+the next turn re-prefilled everything after the system prompt. Now the side
+turn hits the true history entry and stores its own beside it, and the next
+real turn hits the true one again. Conversations taking turns each resume
+from their own state, and requests that share a system prompt and ask
 different things, together or in turn, resume from it as well. More than
-four deep conversations at once wants `HALOGEN_CACHE_ENTRIES` raised to two
-per conversation (about 111 MiB of host RAM each, and the KV rows an entry
-covers stay reserved while it exists). The server prints the memory budget
-at startup and warns before the allocator refuses.
+four deep conversations at once wants `HALOGEN_CACHE_ENTRIES` raised to
+three per conversation (about 111 MiB of host RAM each, and the KV rows an
+entry covers stay reserved while it exists). The server prints the memory
+budget at startup and warns before the allocator refuses.
+
+When the KV pool has no room for a new request, the server forgets the
+least recently used conversation's region and says so in the log (`kv
+pool: no room for N positions; forgot the region at ...`); the entry the
+request is about to resume from is never the one forgotten, and a
+conversation whose only stale entries are dead side turns grows its own
+region in place rather than displacing another conversation. Before 0.11.0
+the eviction order could drop the very entry the request had matched, which
+read as an unexplained cold prefill (issue #61).
 
 `HALOGEN_MAX_TOK` (default 32,768, capped at the context) is the widest single
 prefill call, which sizes a ~4 GB scratch arena. Longer prompts are prefilled
