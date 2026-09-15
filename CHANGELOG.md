@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.11.1
+
+### Fixed
+
+- **An image request after a text request no longer takes the engine down**
+  (issue #62, @ionutpopean04). Since 0.10.1, a request without images
+  cleared the slot's image-position table on admission (the fix for a text
+  turn that had inherited the previous image turn's positions on a cache
+  hit), and that clear dropped the table's buffer while keeping its size.
+  The next image request on the same slot whose table fit that size reused
+  the dropped buffer: `HIP flash_model.hip:4510: invalid argument`, the
+  engine exited, the client got `502 engine closed the connection`, and the
+  container restarted. The order was text → image → text → image, which is
+  any client that sends a text-only side request (a chat title, a summary,
+  a sub-agent) between image turns; text → image → image → text was fine,
+  and 0.10.0 was fine. The clear now keeps the buffer, as the 0.5.0 reset
+  path already did. The release gate's vision cell runs the reporter's
+  order and the control order on one server and checks both image answers.
+
 ## 0.11.0
 
 ### Fixed
