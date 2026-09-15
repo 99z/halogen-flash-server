@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.10.1
+
+### Fixed
+
+- **Composable context: a long conversation could reuse the wrong retained
+  message, then the engine exited** (issue #59, @GavinAstk). With the flag on
+  and the host store at its byte budget (about 18 retained messages at the
+  default 4 GiB), retaining a new message could evict one while a request was
+  part-way through reusing others, and the request then reused a neighbour
+  of the message it meant to; when the two differed in length the engine
+  refused the next reuse and exited, closing every stream on the server
+  (`cc_place(... ): ... pos N != at`, then `502 engine closed the
+  connection`). A reuse is now checked against the message's own tokens
+  before anything is touched, a message that is gone or different is simply
+  read fresh, a placement the engine cannot make ends that one request with
+  an error instead of the process, and a message the prompt cache's snapshot
+  point had split no longer fails to be retained (`... raw rows ... not
+  stored` on stderr). Reproduced on 0.10.0 with the smoke that now guards it
+  and fixed in this build; with the flag off nothing changes.
+- **A text request that resumed from the prompt cache on a slot whose
+  previous request carried an image inherited that request's image position
+  table**, and its new tokens were rotated by it: the same greedy turn
+  diverged from a fresh run some 70 tokens in. Vision servers only
+  (`HALOGEN_VISION_TOWER`); a cache miss had always cleared it. A request
+  without images now clears the table on admission. Measured before and after
+  on the test machine: identical to the restart control after the fix.
+
 ## 0.10.0
 
 ### Added
