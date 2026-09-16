@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.11.2
+
+### Fixed
+
+- **An image request that has to wait for cache room is no longer refused with
+  "GEN declared 1 images but 0 arrived"** (issue #63, @chanadmon11-gif). On a
+  busy server (one slot with the prompt cache holding earlier turns), a
+  mid-conversation image request often has to wait a moment for room before it
+  can start. While it waited, the server dropped the image's pixels and then,
+  on the next attempt, saw an image it no longer had and refused the request
+  with HTTP 400 -- every time, for that turn, while the engine stayed up. The
+  pixels are now kept until the request actually starts, so a queued image turn
+  is served rather than refused. The refusal that remains for a genuinely
+  missing payload now names each declared image (its token offset and size),
+  so a client can pinpoint which one did not arrive.
+
+
 ## 0.11.1
 
 ### Fixed
