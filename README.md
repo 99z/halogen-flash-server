@@ -1433,8 +1433,19 @@ directions: we make no claim about what they buy, and one report
 ([#34](https://github.com/peonist-ai/halogen-flash-server/issues/34)) of an
 unkillable amdgpu deadlock came from a boot that had the first two set. One
 machine, one occurrence, not isolated to either flag, and none since on that
-machine without them. If you do not need them for something else, leave them
-off.
+machine without them. A second machine on the same issue, IOMMU off, ran the
+same workload with all three set and without: with them, 43 GiB of GTT stayed
+allocated after the container exited (`Trying to push to a killed entity` in
+dmesg) and every later start refused at the pin guard until a reboot; without
+them, GTT was back to 17 MiB within 5 s of every exit. Not isolated to one
+flag either. If you do not need them for something else, leave them off, and
+if a start refuses to pin right after a container exit, check
+
+```
+cat /sys/class/drm/card0/device/mem_info_gtt_used
+```
+
+before blaming the host's memory.
 
 Check what you are on with:
 
