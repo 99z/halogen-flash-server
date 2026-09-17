@@ -266,7 +266,11 @@ truncation, so ask for what you need and the server will tell you if it is too
 much. Hard reasoning problems can genuinely exceed 8192: pass a larger budget,
 or `"reasoning_effort": "low"` to make the model think less. Accepted efforts
 are `minimal`, `low`, `medium`, `high` and `xhigh`; the model's own default is
-`xhigh`. `"reasoning_effort": "none"` turns thinking off for that request
+`xhigh`. The chat template itself knows three levels, so the five names fold
+onto them: `minimal` and `low` are `low`, `high` and `xhigh` are `xhigh`, and
+the startup line and `/health` report the level the template will see (#71
+asked why `high` printed as `xhigh`). `medium` is the one step down from the
+default. `"reasoning_effort": "none"` turns thinking off for that request
 (the same as `chat_template_kwargs: {"enable_thinking": false}`, and
 `reasoning: {"effort": "none"}` on `/v1/responses`).
 
