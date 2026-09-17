@@ -95,6 +95,8 @@ GGUF](#bring-your-own-gguf) for which files, and for the numbers.
   on](#the-host-settings-these-numbers-were-measured-on)
 - **[What this release is not](#what-this-release-is-not)**, and the
   [license](#license)
+- **[AGENTS.md](AGENTS.md)**: the short form of all of the above for an AI
+  agent deploying, driving or debugging this server
 
 ---
 

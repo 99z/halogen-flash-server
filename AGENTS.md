@@ -1,0 +1,136 @@
+# AGENTS.md
+
+The short form of this repository for an AI agent that is deploying, driving
+or debugging halogen-flash-server. [README.md](README.md) is the full account
+and is canonical wherever the two disagree.
+
+## What this is
+
+An OpenAI-compatible server for Qwen3.8-Flash-Next on AMD Strix Halo
+(gfx1151), shipped as a container image:
+`ghcr.io/peonist-ai/halogen-flash-server:<version>`. The weights are
+`peonist-ai/halogen-qwen3.8-flash-next` on Hugging Face (118 GiB, tokenizer
+included). Native Linux on the amdgpu/KFD stack, kernel 7.0 or newer. **WSL2
+is not a supported host.** One GPU, one model family.
+
+**The engine is closed source and is not in this repository.** This tree
+holds the deployment surface only:
+
+| file | what it is |
+|---|---|
+| [README.md](README.md) | how to run it, what it measures, every design choice a user meets |
+| [docs/FLAGS.md](docs/FLAGS.md) | every `HALOGEN_*` variable: default, and whether it changes the output |
+| [docs/QUANT.md](docs/QUANT.md) | the precision of every tensor family in the shipped checkpoint |
+| [docker-compose.yml](docker-compose.yml), [deploy/entrypoint.sh](deploy/entrypoint.sh) | the split topology and the container's startup |
+| [tools/](tools/) | the benchmark scripts the README's numbers come from |
+| [CHANGELOG.md](CHANGELOG.md) | what each release changed, with the issue that drove it |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | how to report, and why a diff cannot be merged |
+
+**Do not open a pull request.** There is no inbound licence for code, and a
+patch to a deployment tree cannot reach the engine. Send the analysis in an
+issue: the mechanism, what you measured, what you think the fix is. It is
+credited by handle in the changelog.
+
+## Run it
+
+```bash
+podman run --rm -p 8731:8731 \
+  --device /dev/kfd --device /dev/dri --group-add keep-groups \
+  --ipc=host --ulimit memlock=-1:-1 \
+  -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
+  -v ~/halogen-models:/models \
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.4
+```
+
+- On Docker, `--group-add keep-groups` is `--group-add video --group-add render`.
+- `HALOGEN_DOWNLOAD` fetches on first start and re-fetches nothing after
+  (except a stale 2.4 GiB sidecar). Unset, the container opens no outbound
+  connection.
+- If you split the engine and the API into two containers, **run both from
+  the same image tag**. Each prints its version on its first log line and
+  `/health` reports both.
+- The engine's own port (`HALOGEN_PORT`, 8730) has **no authentication**.
+  Keep it unpublished; only `HALOGEN_API_PORT` (8731) is for clients.
+
+## Before you change a setting
+
+Everything is an environment variable, read once at startup; the full list
+with defaults is [docs/FLAGS.md](docs/FLAGS.md). The ones that decide
+whether it starts and how it behaves:
+
+- **The memory knob is `HALOGEN_KV_POOL_POSITIONS`, not `HALOGEN_KV_SLOTS`.**
+  Slots share one pool; one slot allocates as much as four. An "out of
+  memory" at startup means the pool did not fit: `262144` is the small
+  layout, `524288` the default. `HALOGEN_MAX_TOK=16384` halves the prefill
+  arena if it still will not start. Never raise `HALOGEN_MAX_TOK` to the
+  context.
+- **A request reserves `prompt + max_tokens` positions when admitted** and
+  waits in arrival order when the pool cannot hold it. A large default
+  budget costs concurrency. Above `HALOGEN_MAX_TOKENS_CAP`
+  (65,536) the answer is a 400, not a truncation.
+- **The server's defaults are what your harness runs at.** Coding-agent
+  harnesses send no thinking control to a custom endpoint, so a request
+  without one runs at the model's `xhigh` effort, and the server closes the
+  think block with room for the answer. `HALOGEN_REASONING_EFFORT`,
+  `HALOGEN_ENABLE_THINKING=0` and `HALOGEN_MAX_THINKING_TOKENS` are the server
+  side; a request that names its own wins. The chat route accepts
+  `reasoning_effort`, `enable_thinking`, `max_thinking_tokens` and the
+  OpenRouter and Anthropic shapes; `/health` lists them under `supported`.
+- **The token budget covers thinking too.** `finish_reason: "length"` means
+  the budget ran out; the default is 8,192, and `max_tokens`,
+  `max_completion_tokens` and `max_output_tokens` are the same field.
+- **Images are off until `HALOGEN_VISION_TOWER` is set** (`1` finds the
+  sidecar beside the checkpoint). Without it an image is a 400 naming the
+  flag.
+- **The prompt cache is on** (`HALOGEN_PROMPT_CACHE=2`): a follow-up turn
+  prefills only its new tokens. An answer that resumes from the cache is
+  not always byte-identical to a cold one; `=1` saves only at fixed
+  checkpoints and is, for evaluation and regression suites.
+  `HALOGEN_CACHE_DIR` keeps the cache across a restart.
+- **This server holds most of a 128 GB host.** Read the startup line `host
+  memory left for everything else` and believe it: `free` and `MemAvailable`
+  overstate free memory by about 68 GiB, the size of the locked weights.
+  Another large process beside it, or a pool that leaves under about 10 GiB,
+  turns into minutes-long stalls that look like a hang. The pool is the
+  lever.
+
+Every published number in the README states its conditions (image, flags,
+concurrency, prompt). Quote them with the number.
+
+## Reading the server
+
+- **The first log line is the version**; the lines before `engine listening`
+  are the prologue: what is loaded, the pool, and the memory arithmetic.
+- **`GET /health`** is the authoritative account of the running build: what
+  it accepts (`supported`, `token_budget_aliases`, `max_tokens_default`,
+  whether images are accepted and why not), `version` for both containers,
+  `engine.responds`, `busy`, `busy_for_s`, `in_flight`, `queued`.
+- **`GET /cache`**: hits and stores, and `pool` (`waiting_for_room`,
+  `waiting_s`, `relocated`, `cold_resorts`).
+- **`GET /metrics`**: Prometheus, in llama-server's metric names.
+- **Log lines worth a grep** during a problem: `flash_serve: req N prefill
+  P/T tokens` and `req N generated K tokens` (a long turn's progress),
+  `kv pool:` (room in the pool, evictions, relocations), `lookup table:
+  ... took N s` (the table paging in from disk), `client disconnected`, and
+  the `serve_api:` line at the end of every request with its timings.
+- A cancelled request is a closed connection; there is no cancel by id and
+  no response store.
+
+## Reporting a problem
+
+What resolves most reports on the first exchange (from
+[CONTRIBUTING.md](CONTRIBUTING.md)):
+
+1. The image tag, and every `HALOGEN_*` variable you set.
+2. The prologue, and the container log around the problem. If the server
+   stopped answering: the last lines it printed before it did.
+3. `GET /health` while the problem is happening, not after a restart.
+4. What sent the request (which harness, or the raw body), and the
+   `max_tokens` it sends.
+5. For a speed report: how many requests were in flight, and whether the
+   number is per stream or aggregate.
+
+Check the [CHANGELOG](CHANGELOG.md) and the open issues first: many reports
+are a fixed version. An unsupported host (WSL2, a kernel before 7.0, another
+GPU) is documented, not a bug. Security issues go to the maintainers directly,
+not to a public issue.
