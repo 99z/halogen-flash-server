@@ -106,7 +106,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.3
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.4
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -130,7 +130,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.3
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.4
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -692,8 +692,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.3 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.3 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.4 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.4 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -836,7 +836,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -e HALOGEN_CHECKPOINT=/models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
   -v ~/gguf-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.3
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.4
 ```
 
 Name any shard of a split; the siblings are found by name. With
@@ -1125,7 +1125,49 @@ request is about to resume from is never the one forgotten, and a
 conversation whose only stale entries are dead side turns grows its own
 region in place rather than displacing another conversation. Before 0.11.0
 the eviction order could drop the very entry the request had matched, which
-read as an unexplained cold prefill (issue #61).
+read as an unexplained cold prefill (issue #61). When nothing else is left
+to forget and the request still has no span, because the conversation's own
+region sits where the reservation cannot reach (the upper half of the pool,
+with a reservation past half of it), the server moves that conversation's
+rows into the free span and the turn stays a cache hit (`kv pool: ... moved
+the N rows this request resumes from, region A -> B`); when the rows cannot
+be copied there it forgets them and the turn runs cold. Before 0.11.4 that
+request waited for room that could never appear, with the health probe
+answered throughout (issue #68). A request that waits for a *busy*
+conversation to retire says so once in the log (`kv pool: request N waits
+for M positions ...`), and `/cache` reports it under `pool`
+(`waiting_for_room`, `waiting_s`, `relocated`, `cold_resorts`).
+
+**What the pool leaves the host.** The engine prints, once loaded, how much
+host RAM is left after the weights and the pool (`host memory left for
+everything else`), and since 0.11.4 says under about 10 GiB what that
+means: the lookup table is read from disk through the page cache and never
+held, so that figure is the cache it gets, and below it the table's rows
+page in on every long prompt, a prefill takes minutes instead of seconds,
+and the watchdog can read the stall as a wedge. A reporter's measurements on
+a 128 GB machine with other services resident (issue #35), the pool the only
+change:
+
+| `HALOGEN_KV_POOL_POSITIONS` | 786,432 | 524,288 |
+|---|---|---|
+| host RAM left | 5.6 GiB | 12.7 GiB |
+| free contiguous 2 MiB blocks | 210 | 2,776 |
+| startup to "engine listening" | 38 s | 10 s |
+
+and on identical warm turns (a ~1,425-token prompt, 1,277 cached) before and
+after that change:
+
+| | 786,432 | 524,288 |
+|---|---|---|
+| decode, median | 24.8 t/s | 39.4 t/s |
+| decode, min to max | 13.8 to 38.9 t/s | 33.5 to 41.1 t/s |
+| prefill, median | 6.69 s | 1.51 s |
+| prefill, min to max | 1.50 to 39.88 s | 1.46 to 5.92 s |
+
+The machine this document's numbers come from runs the default pool at
+about 12 GiB left and does not page; the line between the two rows above
+is where the note fires. `HALOGEN_KV_POOL_POSITIONS` and `HALOGEN_MAX_TOK`
+are the two levers; stopping other resident workloads is the third.
 
 `HALOGEN_MAX_TOK` (default 32,768, capped at the context) is the widest single
 prefill call, which sizes a ~4 GB scratch arena. Longer prompts are prefilled

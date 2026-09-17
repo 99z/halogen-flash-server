@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.11.4
+
+### Fixed
+
+- **A speculative request answers exactly what a serial one answers when the
+  thinking cap fires** (issue #69, @drmokchichien). The thinking budget
+  (`max_thinking_tokens`, and since 0.11.0 the answer room, which at
+  `max_tokens` 256 leaves a budget of one token) closes the think block by
+  force when the budget is spent, and the budget is counted on committed
+  tokens. A speculative round commits several at once, so under the draft
+  head the count crossed the budget inside a round and the close landed a
+  token or more later than it does serially; everything after started from
+  a different token, and the two drafters disagreed whenever the cap fired
+  (the reporter's table: different at 64 to 1024, identical at 8192 where
+  thinking ended on its own; the bench's own identity gate failed all ten
+  cases on 0.11.2). A round now commits at most what the budget has left,
+  so the close lands on exactly the budget's token under any drafter, alone
+  or beside other streams. `tools/bench-serving.py serial,mtp 256 low 3`
+  passes with the prompt cache on and off; the reporter's table reads
+  identical at every size. The same accounting bounds `max_tokens`, so the
+  engine no longer computes the rows a length stop would have discarded.
+  Note for anyone gating identity on 0.11.3: with the cache on, that
+  release passed the bench by accident of request order (the speculative
+  arm resumed from the serial arm's saved state, which carried no draft);
+  `HALOGEN_PROMPT_CACHE=0` showed the defect there too.
+- **A request the KV pool cannot place is no longer parked forever**
+  (issue #68, @kamiox). A request reserves its prompt plus `max_tokens`
+  positions in one contiguous span. When the conversation it continues
+  held a region in the upper half of the pool that could not grow to the
+  new reservation, and forgetting every other conversation's region still
+  left the span below it short (the reporter's: 131,584 needed, 131,328
+  free below, 130,816 possible in place, 256 short either way), the
+  scheduler spared that region, found nothing else to forget, and retried
+  every pass, for ever: nothing else was running, so nothing freed
+  anything, the health probe was answered throughout, `/health` read
+  healthy and the request ended only when the client gave up (17 and 30
+  minutes in the report; reproduced here in a minute at 1/8 scale). Now
+  the last resort moves the conversation's own rows into the free span, so
+  the turn stays a cache hit (the log says `moved the N rows this request
+  resumes from, region A -> B`; the answer is byte for byte the in-place
+  hit's), and when the rows cannot be copied there it forgets them and
+  runs the turn cold instead of waiting. A request that does wait, for a
+  busy conversation to retire, now says so once in the log (`kv pool:
+  request N waits for M positions ...`) and `/cache` carries it under
+  `pool`: `waiting_for_room`, `waiting_s`, `relocated`, `cold_resorts`.
+- **The startup note on host memory left draws its conclusion** (issues
+  #35 @loonylabs-dev and #64 @Bushido76). The engine already printed how
+  much host RAM the weights and the KV pool leave; under about 10 GiB it
+  now also says what that means (the lookup table's rows page in from disk
+  on every long prompt, a prefill takes minutes, the watchdog can read the
+  stall as a wedge) and names the two levers, `HALOGEN_KV_POOL_POSITIONS`
+  and `HALOGEN_MAX_TOK`. The README's memory section carries the
+  reporter's two tables.
+
 ## 0.11.3
 
 ### Fixed
