@@ -106,7 +106,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.2
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.3
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -130,7 +130,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.2
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.3
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -692,8 +692,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.2 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.2 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.3 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.3 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -836,7 +836,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -e HALOGEN_CHECKPOINT=/models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
   -v ~/gguf-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.2
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.3
 ```
 
 Name any shard of a split; the siblings are found by name. With
@@ -966,6 +966,20 @@ evaluation suites, regression tests, A/B comparisons, or anything audited. With
 `1`, an answer served from the cache is byte-for-byte what a cold run would have
 produced. With the default it usually is, but not always.
 
+Since 0.11.3 that "not always" applies only to a request that actually
+*resumes* from the cache and continues past it. A request the cache has
+nothing for (the first turn, or any prompt whose prefix is not held) answers
+byte-for-byte what modes `1` and `0` would: the server used to split such a
+request's forward pass at the point it saved, and now captures the state
+mid-pass instead (issue #65 was a cold request under the default mode
+landing on a wrong answer at `temperature 1.0` that mode `1` did not
+produce). An exact repeat of a request also answers byte-for-byte its first
+answer: the server keeps the state at the end of the last request and
+restores it whole. `/health` reports the saved place's alignment as
+`snapshot_align: 64`: the place is the last 64-token boundary before the end
+of the system prompt or of the history, and the next turn re-reads at most
+63 tokens.
+
 Worth knowing what "not always" means, because it is smaller than it sounds.
 The difference only appears where the model was already close to a coin flip
 between two words. Across a battery of tests: the next word was identical in 9
@@ -1078,9 +1092,11 @@ drafter, which is the default, speculates while it is the only conversation
 generating and joins the batch as soon as another one is active, so it never
 holds the others back; prompt lookup rides with it and follows the same rule.
 
-The prompt cache keeps twelve entries (`HALOGEN_CACHE_ENTRIES`), three per
-conversation: one at the end of its system prompt and two at ends of its
-history. Since 0.8.1 a conversation holds a fixed number of entries: a new
+The prompt cache keeps sixteen entries (`HALOGEN_CACHE_ENTRIES`), four per
+conversation: one at the end of its system prompt, two at ends of its
+history, and since 0.11.3 one at the end of its last request, which serves
+an exact repeat of that request without reading anything again
+(`HALOGEN_CACHE_FULL=0` turns that one off). Since 0.8.1 a conversation holds a fixed number of entries: a new
 turn's history entry replaces an older one rather than adding to the list,
 so a long tool-calling session cannot push other sessions out (before that,
 eight tool calls in one session evicted every other conversation, issue #54;
@@ -1096,7 +1112,7 @@ real turn hits the true one again. Conversations taking turns each resume
 from their own state, and requests that share a system prompt and ask
 different things, together or in turn, resume from it as well. More than
 four deep conversations at once wants `HALOGEN_CACHE_ENTRIES` raised to
-three per conversation (about 111 MiB of host RAM each, and the KV rows an
+four per conversation (about 111 MiB of host RAM each, and the KV rows an
 entry covers stay reserved while it exists). The server prints the memory
 budget at startup and warns before the allocator refuses.
 

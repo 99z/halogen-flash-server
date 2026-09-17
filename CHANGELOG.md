@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.11.3
+
+### Fixed
+
+- **A request that starts cold under the default cache mode now answers
+  exactly as it would with the cache off** (issue #65,
+  @lev-medien-sandkasten). The default mode (`HALOGEN_PROMPT_CACHE=2`) saves
+  its place at the end of the system prompt and at the end of the
+  conversation history, and to save its place there it used to split the
+  prompt's forward pass at that point. A split pass is not the same
+  arithmetic as a single one (the second half runs at a different batch
+  size), so a request with nothing to resume still got slightly different
+  logits from the cache-off answer. At temperature 0 the answer was the same;
+  at `temperature 1.0` the sampler could pick a different early token and, on
+  the reporter's reasoning prompt, deterministically land on a coherent wrong
+  answer that `HALOGEN_PROMPT_CACHE=1` did not produce. The pass now runs
+  unsplit and the state is captured mid-pass instead: a cold request under
+  the default mode is byte-identical to modes `1` and `0`, verified on the
+  reporter's request and on 161 to 32,768-token prompts. A request that
+  *resumes* from the cache is unchanged in kind (a resume was and is a
+  numeric seam, documented under *Choosing a cache mode*); its saved place
+  is now up to 63 tokens before the exact point, and the next turn re-reads
+  those. An exact repeat of a request is a special case: the server now
+  keeps one more entry per conversation, the state at the end of the last
+  request, so a repeated request restores it and reads nothing again,
+  answering byte for byte what it answered the first time (and a little
+  faster). `HALOGEN_CACHE_ENTRIES` therefore defaults to 16 (four per
+  conversation, about 111 MiB of host RAM each); `HALOGEN_CACHE_FULL=0`
+  turns that entry off. `/health` reports `snapshot_align: 64`; `/cache`
+  gains `tapped` and `full_hits`.
+- **Reasoning no longer streams twice on `/v1/responses` when a summary is
+  asked for** (issue #67, @UtkuKaynak). With `reasoning: {"summary":
+  "auto"}` the same text went out both as `response.reasoning_text.delta`
+  and as `response.reasoning_summary_text.delta`, and a client that renders
+  both kinds of delta into one thinking block (Pi, oh-my-pi) showed every
+  word twice. Only the stream the request asked for goes out now: the
+  summary events with a summary asked, the raw `reasoning_text` events
+  without. The reasoning item itself is unchanged (both `summary` and
+  `content` when a summary was asked), so Codex and SDK readers see what
+  they saw before.
+- **The startup line printed while the KV pool is being reserved now names
+  the state it was missing** (issue #33, @felladrin): compaction stalls
+  climbing with the failed count climbing beside them and the free block
+  count flat means the kernel is finding nothing to compact, and the step
+  waits on another large process letting memory go.
+
+### Documentation
+
+- The kernel command line section carries the second data point on
+  `amdgpu.vm_update_mode=0` / `amdgpu.noretry=0` / `amdgpu.sg_display=0`
+  (issue #34, @Unveiledlogic): with them set, GTT stayed allocated after
+  the container exited and the next start refused at the pin guard;
+  without them it was released within seconds. The advice stays: leave
+  them off.
+
+
 ## 0.11.2
 
 ### Fixed
