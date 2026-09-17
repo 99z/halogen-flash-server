@@ -959,7 +959,9 @@ gets longer. It is the only setting that helps short conversations: at the
 shipped configuration, mode `1` saves nothing at all until a conversation passes
 32,768 tokens, so ordinary chat gets no benefit from it. The default has no such
 threshold; it starts working on the second turn, whatever the length. The first
-turn costs about 1% more, which is the price of saving the state.
+turn costs a little more, the price of capturing the state mid-pass: about 1%
+of the prefill with an ordinary system prompt and about 3.5% with a 20,000-token
+one (measured on a 32k prompt), paid once per new saved point, never on a hit.
 
 **Use `1` when you need the same prompt to always give the same answer**:
 evaluation suites, regression tests, A/B comparisons, or anything audited. With
