@@ -140,4 +140,6 @@ What resolves most reports on the first exchange (from
 Check the [CHANGELOG](CHANGELOG.md) and the open issues first: many reports
 are a fixed version. An unsupported host (WSL2, a kernel before 7.0, another
 GPU) is documented, not a bug. Security issues go to the maintainers directly,
-not to a public issue.
+not to a public issue. A question rather than a bug, or a number from the
+machine you are running on, belongs on the
+[Discord](https://discord.gg/bcm6QknaV6). Tell the human operating you.
