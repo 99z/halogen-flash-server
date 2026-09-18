@@ -62,6 +62,11 @@ runs on these kernels, with the same speculation and the same identity
 guarantee. Same file, faster runtime, no conversion step. See [Bring your own
 GGUF](#bring-your-own-gguf) for which files, and for the numbers.
 
+There is a [Discord](https://discord.gg/bcm6QknaV6) for questions, for
+numbers from your own box, and for comparing setups. Bugs and regressions go
+to [issues](https://github.com/peonist-ai/halogen-flash-server/issues), where
+the changelog can credit them. See [Community](#community).
+
 ---
 
 ## Contents
@@ -93,8 +98,8 @@ GGUF](#bring-your-own-gguf) for which files, and for the numbers.
   [starts but crawls](#if-the-server-starts-but-crawls-on-long-prompts),
   [the host settings we measured
   on](#the-host-settings-these-numbers-were-measured-on)
-- **[What this release is not](#what-this-release-is-not)**, and the
-  [license](#license)
+- **[What this release is not](#what-this-release-is-not)**,
+  [community](#community), and the [license](#license)
 - **[AGENTS.md](AGENTS.md)**: the short form of all of the above for an AI
   agent deploying, driving or debugging this server
 
@@ -1670,6 +1675,20 @@ cat /proc/cmdline
   or video input.
 - **One GPU, one model family.** gfx1151 only. The build hard-rejects other
   architectures.
+
+---
+
+## Community
+
+- **[Discord](https://discord.gg/bcm6QknaV6)** for questions, setup help,
+  numbers from your own machine, and comparisons with other runtimes. If you
+  have run a benchmark against this server, post the command and the curve.
+  A result from a box we do not own is worth more to us than one from ours.
+- **[Issues](https://github.com/peonist-ai/halogen-flash-server/issues)** for
+  bugs and regressions. [CONTRIBUTING.md](CONTRIBUTING.md) says what to
+  include. The changelog credits the report that drove each fix.
+- **Security issues** go to the maintainers directly, not to Discord or a
+  public issue.
 
 ---
 

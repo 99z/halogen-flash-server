@@ -3,6 +3,13 @@
 Reports are genuinely wanted. Several releases have been driven entirely by
 them, and the changelog credits the people who found the problems.
 
+**Where to ask**
+
+Questions, setup help and numbers from your own machine belong on the
+[Discord](https://discord.gg/bcm6QknaV6). Bugs and regressions belong in an
+issue here, so the fix can be tracked and credited. If you are not sure which
+it is, ask on Discord first.
+
 **What helps most**
 
 - What you ran, what you expected, what happened.
