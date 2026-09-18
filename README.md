@@ -571,7 +571,7 @@ pool), and it does not depend on the machine; what is left does, so read the
 
 | configuration | device side | halogen takes | what you give up |
 |---|---|---|---|
-| the Quickstart defaults: pool 786,432, 4 slots, `MAX_TOK` 32768 | ~42 GiB | ~110 GiB | nothing |
+| the Quickstart defaults: pool 524,288, 4 slots, `MAX_TOK` 32768 | ~35 GiB | ~103 GiB | nothing |
 | pool 262,144, 2 slots | ~28 GiB | ~96 GiB | one full-length conversation resident at a time |
 | pool 262,144, 2 slots, `MAX_TOK` 16384 | ~19 GiB | ~87 GiB | the above, and prefill about 9% slower |
 | context 131,072, pool 131,072, 2 slots, `MAX_TOK` 16384 | ~16 GiB | ~84 GiB | the above, and half the context |

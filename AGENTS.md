@@ -63,7 +63,10 @@ whether it starts and how it behaves:
   memory" at startup means the pool did not fit: `262144` is the small
   layout, `524288` the default. `HALOGEN_MAX_TOK=16384` gives back about
   8.8 GiB of working memory for ~9% of prefill speed when the pool cannot
-  go lower. Never raise `HALOGEN_MAX_TOK` to the context.
+  go lower. Never raise `HALOGEN_MAX_TOK` to the context. If the machine
+  must also run other things, the README's [If you must share
+  it](README.md#if-you-must-share-it) has what each layout takes and a
+  run command for each; the weights (68 GiB) are pinned in every one.
 - **A request reserves `prompt + max_tokens` positions when admitted** and
   waits in arrival order when the pool cannot hold it. A large default
   budget costs concurrency. Above `HALOGEN_MAX_TOKENS_CAP`
