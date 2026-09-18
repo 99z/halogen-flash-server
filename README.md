@@ -77,7 +77,8 @@ the changelog can credit them. See [Community](#community).
   [Codex and the Responses API](#codex-and-the-responses-api),
   [from an agent harness](#from-an-agent-harness)
 - **[Give it a machine of its own](#give-it-a-machine-of-its-own)**: what this
-  server holds, and what that leaves for anything else
+  server holds, what that leaves for anything else, and
+  [the recipes if you must share it](#if-you-must-share-it)
 - **[Measured](#measured)**: prefill and decode,
   [against the alternatives](#against-the-alternatives), and
   [end to end over HTTP](#served-throughput-end-to-end-over-http)
@@ -557,6 +558,86 @@ above. Options, in the order worth trying:
 
 Compacting memory afterwards does not help, because the memory this server
 holds cannot be moved. If you need to reclaim it, stop the server.
+
+### If you must share it
+
+The 68 GiB of weights are pinned and do not move. Everything else the server
+takes is decided by three settings, so sharing the machine means choosing
+how much of the other half you keep. What each configuration takes is the
+engine's own fit arithmetic (the same model the startup uses to size the
+pool), and it does not depend on the machine; what is left does, so read the
+`host memory left for everything else` line on yours and believe it over
+`free`.
+
+| configuration | device side | halogen takes | what you give up |
+|---|---|---|---|
+| the Quickstart defaults: pool 786,432, 4 slots, `MAX_TOK` 32768 | ~42 GiB | ~110 GiB | nothing |
+| pool 262,144, 2 slots | ~28 GiB | ~96 GiB | one full-length conversation resident at a time |
+| pool 262,144, 2 slots, `MAX_TOK` 16384 | ~19 GiB | ~87 GiB | the above, and prefill about 9% slower |
+| context 131,072, pool 131,072, 2 slots, `MAX_TOK` 16384 | ~16 GiB | ~84 GiB | the above, and half the context |
+
+Every recipe below assumes the weights are already in `~/halogen-models`
+(the Quickstart's first start put them there). On Docker, replace
+`--group-add keep-groups` with `--group-add video --group-add render`. With
+the shipped `docker-compose.yml`, put the same variables under the engine's
+`environment:`.
+
+**Share about a third of the machine.** One conversation at the full
+context stays warm between turns; two of them alternating re-prefill on
+each turn; two shorter ones (100k each, say) both stay warm. Speed and
+answers are unchanged.
+
+```bash
+podman run --rm -p 8731:8731 \
+  --device /dev/kfd --device /dev/dri --group-add keep-groups \
+  --ipc=host --ulimit memlock=-1:-1 \
+  -e HALOGEN_KV_POOL_POSITIONS=262144 \
+  -e HALOGEN_KV_SLOTS=2 \
+  -v ~/halogen-models:/models:ro \
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.8
+```
+
+**The smallest footprint at the full context.** The prefill arena halves.
+Prefill runs about 9% slower (measured at 262k through the server), and a
+prompt admitted while another stream is decoding stalls it for half as long.
+Nothing else changes.
+
+```bash
+podman run --rm -p 8731:8731 \
+  --device /dev/kfd --device /dev/dri --group-add keep-groups \
+  --ipc=host --ulimit memlock=-1:-1 \
+  -e HALOGEN_KV_POOL_POSITIONS=262144 \
+  -e HALOGEN_KV_SLOTS=2 \
+  -e HALOGEN_MAX_TOK=16384 \
+  -v ~/halogen-models:/models:ro \
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.8
+```
+
+**If 131k of context is enough.** The pool cannot be smaller than one
+request's context, so a smaller context is what lets it go under 262,144. A
+prompt at or past 131,072 tokens gets a 400 that says so.
+
+```bash
+podman run --rm -p 8731:8731 \
+  --device /dev/kfd --device /dev/dri --group-add keep-groups \
+  --ipc=host --ulimit memlock=-1:-1 \
+  -e HALOGEN_CTX=131072 \
+  -e HALOGEN_KV_POOL_POSITIONS=131072 \
+  -e HALOGEN_KV_SLOTS=2 \
+  -e HALOGEN_MAX_TOK=16384 \
+  -v ~/halogen-models:/models:ro \
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.8
+```
+
+Two things hold for all of them. The lookup table (the n-gram embedding,
+47.7 GiB, read from the file on demand) lives in the page cache, not in the
+numbers above. A neighbour that pushes it out makes the next cold prompt
+read its rows from disk before it starts: about 1.3 s on a 32k prompt from
+an NVMe drive, more from a slower one, and the `lookup table: ... took N s`
+log line reports any read of 2 s or more. And a neighbour that takes the
+room this server was going to grow into produces the stall described above,
+on both sides. The `host memory left` line is the budget. Size the
+neighbours to it, not to `free`.
 
 ---
 
