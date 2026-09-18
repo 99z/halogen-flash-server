@@ -108,7 +108,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.7
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.8
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -132,7 +132,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.7
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.8
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -713,8 +713,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.7 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.7 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.8 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.8 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -857,7 +857,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -e HALOGEN_CHECKPOINT=/models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
   -v ~/gguf-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.7
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.8
 ```
 
 Name any shard of a split; the siblings are found by name. With
@@ -1071,6 +1071,18 @@ Generation speed follows a conversation's own length, not the pool: a short
 chat in a 1M-position pool runs at short-chat speed, and three conversations
 at 250k each generate at about 17 tokens per second apiece.
 
+**Check what pool you actually got.** The fit at startup budgets `MemTotal`
+less the resident weights (67.7 GiB) and `HALOGEN_HOST_RESERVE_GIB` (20), and
+a 524,288 pool at `HALOGEN_MAX_TOK=32768` needs about 36.7 GiB (14.4 for the
+pool, 20.6 for the arena and the slots, 1.7 of margin). A 128 GB machine
+whose `MemTotal` reads 125 GiB fits it; one that reads 122.7 GiB (a
+`crashkernel` reservation of 2 GB is enough) does not, and the pool halves
+to 262,144 with the line `kv pool: 524288 positions need ~36.7 GiB ...
+LOWERING THE POOL TO 262144` in the startup log. Every request line since
+0.11.5 ends with `pool N/<positions>`, so a grep settles it. On such a
+machine `HALOGEN_MAX_TOK=16384` gives back 8.8 GiB (about 9% of prefill
+speed) and 524,288 fits; at `8192` even 786,432 does (issue #75).
+
 **Sizing for a fan-out harness** (a parent that runs subagents in parallel,
 issue #75). Every live conversation holds `prompt + max_tokens` between its
 turns, so the pool must hold their sum: `pool >= sum over live conversations
@@ -1226,7 +1238,10 @@ decoding in, the rows are copied to a fresh span, and since 0.11.5 a held
 region whose longest entry the request resumes from is *moved* (`kv pool:
 moved the N rows this request resumes from, region A -> B ... the old
 region is free`) rather than copied and left behind, so a stale duplicate
-never competes with a live conversation for the pool. Before 0.11.5 two
+never competes with a live conversation for the pool. Since 0.11.8 all of
+this applies whether or not the client sends `reasoning_content` back; on
+0.11.7 a client that did not was on the older path (issue #75, the second
+report). Before 0.11.5 two
 long conversations taking turns behind a shared system prompt forgot each
 other on every turn (issue #74): the first's growth could not extend or
 copy, the second's region was the only one to forget, and each turn

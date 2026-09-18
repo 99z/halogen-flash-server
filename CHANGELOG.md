@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.11.8
+
+### Fixed
+
+- **0.11.7's pool changes now apply to clients that do not send
+  `reasoning_content` back** (issue #75, the second report from @jtsylve).
+  Since 0.11.3 the cache keeps a FULL entry at each turn's prompt end, for an
+  exact repeat of that prompt. A follow-up from a client that omits the
+  reasoning cannot match it (the template writes `<think>\n\n</think>` where
+  the model generated `<think>\n`, and the tokens differ), so the entry it
+  hits is the history entry a few tokens shorter, and the region held "a
+  longer entry". That made the region not the conversation's own to take
+  over, and every step 0.11.7 added (grow in place, move, pack, the clamp)
+  was skipped: with free space in the pool the turn took a fresh span, copied
+  its rows and left the old region held as a stale duplicate; with none it
+  fell to `grows in place: forgot 1 longer entries (cheapest)`. Clients that
+  replay their reasoning (Pi with `reasoning: true`) hit the FULL entry
+  itself and were on the fixed path all along; hermes-agent and most
+  OpenAI-shaped clients were not. Now a FULL entry past the hit does not
+  block the takeover; it is dropped (the generation overwrites those rows in
+  any case; what is lost is an exact repeat of the previous prompt after the
+  next turn began). The fan-out recipe with thinking on and no replay reads
+  `moved 2, relocated 3, packed 1, rows_copied 0` where 0.11.7 read `moved 0,
+  relocated 0, rows_copied 4` and forgot the parent on its second turn.
+  `HALOGEN_CACHE_FULL=0` was the stopgap on 0.11.7.
+
+### Documentation
+
+- **A 128 GB box can start with a 262,144 pool without meaning to.** The
+  startup fit budgets `MemTotal` less the 67.7 GiB of resident weights and
+  the 20 GiB host reserve; at `HALOGEN_MAX_TOK=32768` a 524,288 pool needs
+  about 36.7 GiB, and a machine whose `MemTotal` reads 122.7 GiB (a
+  `crashkernel` reservation is enough) has 35.0, so the pool halves and the
+  log says `LOWERING THE POOL TO 262144`. The README's memory section now
+  says so, with the arithmetic; `HALOGEN_MAX_TOK=16384` is the lever
+  (issue #75, @myliuyx).
+
 ## 0.11.7
 
 ### Fixed
