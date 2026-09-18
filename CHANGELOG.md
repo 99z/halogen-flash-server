@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.11.6
+
+### Added
+
+- **The engine reads llama.cpp K-quant GGUFs.** `HALOGEN_CHECKPOINT` may now
+  name a `Q4_K` / `Q5_K` / `Q5_1` file (unsloth's `UD-Q4_K_XL`), which 0.11.5
+  refused by name. Those blocks are read losslessly, as the exact affine
+  planes their values define (a per-block scale and minimum, and the packed
+  4- or 5-bit weights), the same "moved, not requantized" repack the engine
+  already did for the `IQ4_XS` family; a K-quant file's perplexity and
+  fixture agreement are its own, not a rounded copy's. On `UD-Q4_K_XL` this
+  is the most accurate GGUF the engine runs, 0.020 nats better perplexity
+  than `UD-IQ4_XS` and 0.033 better than the engine's own checkpoint over
+  32K tokens, at the same prefill and about 3% slower serial decode. See
+  **Bring your own GGUF** in the README for the full comparison and the list
+  of which block types are read and which are still refused (`Q4_1`, `Q5_0`,
+  `Q2_K`, `Q3_K` and the IQ2/IQ1/F16 families, each by name at startup).
+
 ## 0.11.5
 
 ### Fixed

@@ -108,7 +108,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.5
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.6
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -132,7 +132,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.5
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.6
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -713,8 +713,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.5 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.5 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.6 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.6 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -857,7 +857,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -e HALOGEN_CHECKPOINT=/models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
   -v ~/gguf-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.5
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.6
 ```
 
 Name any shard of a split; the siblings are found by name. With
@@ -867,16 +867,17 @@ repo, 1.4 GiB in all; the GGUF itself is never downloaded by this image. Or
 put both beside the GGUF yourself and mount the volume read-only.
 `HALOGEN_MTP_HEAD` points at the head file if it lives elsewhere.
 
-**Which files.** The repack is lossless only where the format's values are
-a small set times a per-block scale, which is the whole `IQ4_NL` / `IQ4_XS` /
+**Which files.** The repack is lossless where the format's values are a
+small set times a per-block scale, which is the whole `IQ4_NL` / `IQ4_XS` /
 `IQ3_S` / `Q4_0` family for the experts, `Q8_0` for the dense layers and
 `Q6_K` for the output projection; that is unsloth's `UD-IQ4_XS` build exactly
-(it is what every number below was measured on), and any `llama-quantize`
-output in those types. The K-quant builds (`Q4_K`, `Q5_K`, `Q5_1`, `Q4_1`;
-unsloth's `UD-Q4_K_XL`) and the IQ2/IQ1 families are **refused by name at
-startup**, before anything is loaded, because reading them needs kernels for
-their block layouts rather than a repack, and a lossy fallback would make
-"the same file" untrue. Those are next.
+(the file most numbers below were measured on), and any `llama-quantize`
+output in those types. Since 0.11.6 the engine reads the K-quant blocks
+`Q4_K`, `Q5_K` and `Q5_1` the same way, as their exact affine planes, which
+is unsloth's `UD-Q4_K_XL` build. Only `Q4_1`, `Q5_0`, `Q2_K`, `Q3_K` and the
+IQ2/IQ1/F16 families are **refused by name at startup**, before anything is
+loaded, because reading them needs kernels for their block layouts rather
+than a repack, and a lossy fallback would make "the same file" untrue.
 
 **The short version: the GGUF costs decode and 4 GiB of RAM, and nothing
 else.** Same prefill, better perplexity, 24 GB less disk; serial decode about
@@ -902,6 +903,21 @@ at 8 bits and crushes the experts to about 3.4 bits, and that beats our
 calibrated 4-bit dense layers over 4.5-bit experts. The decode row is the
 price of the same bytes: an 8-bit trunk is 2 GB more per token at 240 GB/s,
 and no lossless repack avoids it. Prefill is compute-bound and does not care.
+
+**unsloth's `UD-Q4_K_XL`, the K-quant build (0.11.6).** Read the same way,
+its own quantized values moved into the affine planes the kernels take with
+nothing requantized, and measured against `UD-IQ4_XS` in the same session on
+the same machine, MTP on in both. It is 104 GiB on disk and holds about
+78 GiB in RAM, because its `Q4_K` / `Q5_K` dense rows carry more bits than
+`UD-IQ4_XS`'s. It is the more accurate of the two: perplexity 0.020 nats
+lower than `UD-IQ4_XS` over 32K tokens (0.033 lower than the engine's own
+checkpoint, which both GGUFs beat), and fixture agreement 31/32 and 32/32
+against transformers where `UD-IQ4_XS` scores 30 and 31. Prefill is the same
+(1,267 / 1,440 tok/s at 8,192 / 32,768, within 2% of `UD-IQ4_XS`); serial
+decode is about 3% slower (25.2 against 26.0 tok/s at short context) and the
+draft head accepts about as often (49% against 45% on prose). It carries the
+same 4 GiB of draft head and tokenizer and the same refusals; every
+speculative stream is byte-identical to serial greedy on it too.
 
 **Against llama.cpp on the same bytes, same machine, same session** (their
 `strix-halo` branch, built and run at their settings on stock ROCm 7.14, so
