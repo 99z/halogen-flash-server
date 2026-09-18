@@ -4,8 +4,8 @@
 
 # halogen-flash-server
 
-**The fastest way to run Qwen3.8-Flash-Next on AMD Strix Halo, and it does not
-get there by spending fewer bits.**
+**halogen™ is the fastest way to run Qwen3.8-Flash-Next on AMD Strix Halo,
+and it does not get there by spending fewer bits.**
 
 Every kernel is written for this one GPU and this one model family. No
 general-purpose runtime, no portability layer, no fallback path. That is why it
@@ -1176,9 +1176,28 @@ is where the note fires. `HALOGEN_KV_POOL_POSITIONS` and `HALOGEN_MAX_TOK`
 are the two levers; stopping other resident workloads is the third.
 
 `HALOGEN_MAX_TOK` (default 32,768, capped at the context) is the widest single
-prefill call, which sizes a ~4 GB scratch arena. Longer prompts are prefilled
-in pieces. Do not raise it to the native context. That allocation does not
-fit, and the server will not start.
+prefill call, and it sizes the working memory the server holds beside the
+pool, which is a good deal more than the GEMM arena alone: the startup
+line's `working memory` reads **21.3 GiB at 32,768, 12.5 GiB at 16,384 and
+8.1 GiB at 8,192** on the 0.11.4 image. Halving it gives back 8.8 GiB for
+about 9% of prefill speed, a long prompt read in more pieces, and the
+answer byte-identical. That made it the lever on the same reporter's next
+two boxes (issue #35), both shared with other work and both already
+auto-lowered to one full conversation of pool, so the pool could not go
+lower without cutting what one request may use (box A / box B):
+
+| | before | after |
+|---|---|---|
+| `HALOGEN_MAX_TOK` | 32,768 | 16,384 |
+| pool | 262,144 (auto-lowered) | 393,216 (set) |
+| working memory | 21.3 GiB | 12.5 GiB |
+| host memory left | 11.8 / 16.1 GiB | 17.1 / 20.5 GiB |
+| free contiguous 2 MiB blocks | 79 / 123 | 823 / 1,136 |
+| compaction stalls reserving the pool | 194 (194 failed) / none | 0 / 0 |
+| startup to "engine listening" | 97 s / 50 s | 18 s / 7 s |
+
+Longer prompts are prefilled in pieces. Do not raise it to the native
+context. That allocation does not fit, and the server will not start.
 
 ### Prompt cache on disk: resume a conversation after a restart
 
@@ -1373,8 +1392,11 @@ The knob is the pool:
 
 That is 27.8 GB, the same layout 0.2.0 ran, and it still serves four
 conversations at once. `524288` is 35.0 GB and is the default. If it still
-will not start, halve the prefill arena as well with `-e HALOGEN_MAX_TOK=16384`,
-which costs about 9% of prefill speed.
+will not start, halve the prefill call as well with `-e HALOGEN_MAX_TOK=16384`,
+which gives back about 8.8 GiB (the startup line's working memory, 21.3 to
+12.5 GiB) for about 9% of prefill speed; the [memory
+section](#context-and-memory-one-kv-pool-several-conversations) has the
+measured table.
 
 ### If the server starts but crawls on long prompts
 
@@ -1554,3 +1576,8 @@ The engine is distributed under the terms in [LICENSE.md](LICENSE.md).
 Third-party components and their licenses are listed in
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Model weights are licensed
 separately by their original authors.
+
+"halogen" and "Peonist" are trademarks of Peonist, LLC (U.S. application
+pending). [TRADEMARKS.md](TRADEMARKS.md) says how the names may be used;
+referring to the project, running it, and publishing numbers about it need
+no permission.

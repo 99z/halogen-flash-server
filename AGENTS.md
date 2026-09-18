@@ -61,9 +61,9 @@ whether it starts and how it behaves:
 - **The memory knob is `HALOGEN_KV_POOL_POSITIONS`, not `HALOGEN_KV_SLOTS`.**
   Slots share one pool; one slot allocates as much as four. An "out of
   memory" at startup means the pool did not fit: `262144` is the small
-  layout, `524288` the default. `HALOGEN_MAX_TOK=16384` halves the prefill
-  arena if it still will not start. Never raise `HALOGEN_MAX_TOK` to the
-  context.
+  layout, `524288` the default. `HALOGEN_MAX_TOK=16384` gives back about
+  8.8 GiB of working memory for ~9% of prefill speed when the pool cannot
+  go lower. Never raise `HALOGEN_MAX_TOK` to the context.
 - **A request reserves `prompt + max_tokens` positions when admitted** and
   waits in arrival order when the pool cannot hold it. A large default
   budget costs concurrency. Above `HALOGEN_MAX_TOKENS_CAP`
