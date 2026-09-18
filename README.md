@@ -108,7 +108,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.4
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.5
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -132,7 +132,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.4
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.5
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -398,12 +398,27 @@ upstream) reads this server unchanged: `llamacpp:prompt_tokens_total`,
 engine's own per-request numbers, summed; `prompt_n` is the processed count),
 the `prompt_tokens_seconds` / `predicted_tokens_seconds` gauges over the
 requests since the last scrape, `requests_processing`, `requests_deferred`,
-`kv_cache_tokens` and `kv_cache_usage_ratio` (the positions the requests in
-flight reserve, prompt plus `max_tokens` each, over the pool). Beside them,
+`kv_cache_tokens` and `kv_cache_usage_ratio` (since 0.11.5 the engine's own
+occupancy: the positions its pool holds in every region, busy and held,
+over the pool, as of the last completed request; before 0.11.5 they counted
+what the requests holding a front-end slot had asked for, admitted or not,
+which read 913k against a 655k pool in issue #74). Beside them,
 `halogen:requests_total`, `halogen:prompt_tokens_cached_total`,
-`halogen:draft_tokens_total`, `halogen:draft_tokens_accepted_total` and
-`halogen:structured_requests_total`. Always on, no flag, no engine round
-trip.
+`halogen:draft_tokens_total`, `halogen:draft_tokens_accepted_total`,
+`halogen:structured_requests_total`, and since 0.11.5 `halogen:kv_pool_positions`
+and `halogen:kv_pool_reserved_tokens` (the front end's reservation, the old
+meaning). Always on, no flag, no engine round trip.
+
+**Cache and pool occupancy in the log** (since 0.11.5; #73): every
+request's `serve_api:` line carries the cached share of its prompt, the
+prefill rate over the tokens actually processed, and the pool's occupancy
+as the engine reports it: `prompt 59498 (58013 cached, 97.5%), prefill 2.29s
+= 648 t/s | ... | pool 412224/655360 63%`. `GET /cache` adds
+`token_hit_rate` (prompt tokens the cache covered over every prompt token
+seen since the server started; `hit_rate` counts requests) and, under
+`pool`, `positions`, `used`, `usage_ratio`, `busy_regions` (a request
+decoding), `held_regions` (a warm conversation between turns, not a full
+pool), `room_clamped` and `moved`.
 
 **Structured output** (since 0.8.0; #14, #43). `response_format:
 {"type": "json_schema", "json_schema": {"name": ..., "schema": {...}}}` and
@@ -698,8 +713,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.4 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.4 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.5 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.5 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -842,7 +857,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -e HALOGEN_CHECKPOINT=/models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
   -v ~/gguf-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.4
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.5
 ```
 
 Name any shard of a split; the siblings are found by name. With
@@ -1143,6 +1158,28 @@ answered throughout (issue #68). A request that waits for a *busy*
 conversation to retire says so once in the log (`kv pool: request N waits
 for M positions ...`), and `/cache` reports it under `pool`
 (`waiting_for_room`, `waiting_s`, `relocated`, `cold_resorts`).
+
+A conversation keeps its whole reservation between turns, and since 0.11.5
+its next turn uses it. A follow-up whose region cannot grow (another
+conversation's region sits directly after it) runs in the room the region
+has left, with `max_tokens` clamped to that room, when the room is at least
+the answer room (`max(1024, 15%)` of the request's `max_tokens`, twice that
+when the request thinks). The log says so (`kv pool: the region at A this
+request resumes from cannot grow; the turn runs in the N positions it has
+left (max_tokens 32768 -> 30521)`), the request line ends with `max_tokens
+clamped 32768 -> 30521`, and the response's `timings` carries
+`max_tokens_clamped_from` and `max_tokens_clamped_to`, so a `finish_reason`
+of `length` on such a turn is legible. When the room is smaller than that,
+or the conversation resumes from a region another request is decoding in,
+the rows are copied to a fresh span as before, and since 0.11.5 a held
+region whose longest entry the request resumes from is *moved* (`kv pool:
+moved the N rows this request resumes from, region A -> B ... the old
+region is free`) rather than copied and left behind, so a stale duplicate
+never competes with a live conversation for the pool. Before 0.11.5 two
+long conversations taking turns behind a shared system prompt forgot each
+other on every turn (issue #74): the first's growth could not extend or
+copy, the second's region was the only one to forget, and each turn
+re-prefilled the whole history at 100 to 160 s.
 
 **What the pool leaves the host.** The engine prints, once loaded, how much
 host RAM is left after the weights and the pool (`host memory left for

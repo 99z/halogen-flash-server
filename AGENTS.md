@@ -39,7 +39,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.4
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.5
 ```
 
 - On Docker, `--group-add keep-groups` is `--group-add video --group-add render`.
@@ -105,14 +105,21 @@ concurrency, prompt). Quote them with the number.
   it accepts (`supported`, `token_budget_aliases`, `max_tokens_default`,
   whether images are accepted and why not), `version` for both containers,
   `engine.responds`, `busy`, `busy_for_s`, `in_flight`, `queued`.
-- **`GET /cache`**: hits and stores, and `pool` (`waiting_for_room`,
-  `waiting_s`, `relocated`, `cold_resorts`).
+- **`GET /cache`**: hits and stores, `hit_rate` (requests) and
+  `token_hit_rate` (prompt tokens), and `pool`: `positions`, `used`,
+  `usage_ratio`, `busy_regions`, `held_regions` (a warm conversation between
+  turns, not a full pool), `waiting_for_room`, `waiting_s`, `relocated`,
+  `cold_resorts`, `room_clamped`, `moved`.
 - **`GET /metrics`**: Prometheus, in llama-server's metric names.
 - **Log lines worth a grep** during a problem: `flash_serve: req N prefill
   P/T tokens` and `req N generated K tokens` (a long turn's progress),
-  `kv pool:` (room in the pool, evictions, relocations), `lookup table:
+  `kv pool:` (room in the pool, evictions, a turn run in the room its region
+  had left with `max_tokens` clamped, a region moved), `lookup table:
   ... took N s` (the table paging in from disk), `client disconnected`, and
-  the `serve_api:` line at the end of every request with its timings.
+  the `serve_api:` line at the end of every request with its timings, the
+  cached share of the prompt, the prefill rate and the pool's occupancy
+  (`prompt 59498 (58013 cached, 97.5%), prefill 2.29s = 648 t/s | ... |
+  pool 412224/655360 63%`).
 - A cancelled request is a closed connection; there is no cancel by id and
   no response store.
 

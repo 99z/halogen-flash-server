@@ -154,7 +154,7 @@ if DEPTH:
 LEDGER = re.compile(
     r"serve_api: (\w+) (\d+) tok in ([\d.]+)s = ([\d.]+) t/s \| "
     r"(\d+) rounds, commit ([\d.]+)/round \| prompt (\d+)"
-    r"(?: \((\d+) cached\))?, prefill ([\d.]+)s")
+    r"(?: \((\d+) cached(?:, [\d.]+%)?\))?, prefill ([\d.]+)s")
 
 
 def _api_output():

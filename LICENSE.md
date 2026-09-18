@@ -2,7 +2,7 @@
 
 **Version 0.1 · Effective 25 August 2026**
 
-This Agreement is between you ("**You**") and **Peonist** ("we", "us"), and
+This Agreement is between you ("**You**") and **Peonist, LLC** ("we", "us"), and
 governs your use of **halogen** (the "**Software**") — the container image
 published by us containing the halogen inference engine binary, its serving
 front-end, and supporting scripts.
@@ -57,7 +57,8 @@ You may not:
    `THIRD-PARTY-NOTICES.md`.
 3. **Use our names or marks** — "Peonist", "halogen" — to endorse or promote
    your products without our written permission. Factually stating that your
-   product runs on halogen is fine and needs no permission.
+   product runs on halogen is fine and needs no permission. `TRADEMARKS.md`
+   states the full policy.
 
 **On reverse engineering.** We do not prohibit it, and we would rather say so
 plainly than pretend otherwise: the engine ships as a compiled binary
@@ -155,4 +156,4 @@ terms will apply to those versions, not retroactively to this one.
 ---
 
 **Contact:** open an issue at https://github.com/peonist-ai/halogen-flash-server
-**Copyright © 2026 Peonist. All rights reserved.**
+**Copyright © 2026 Peonist, LLC. All rights reserved.**

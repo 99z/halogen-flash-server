@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.11.5
+
+### Fixed
+
+- **Two long conversations taking turns no longer forget each other on
+  every turn** (issue #74, @eemin). A conversation keeps its whole
+  reservation (prompt plus `max_tokens`) between turns, and a second
+  conversation's region is placed directly after it. When the first's next
+  turn needed a few hundred more positions, its region could not grow, no
+  free span held a copy, and the only region left to forget was the
+  second's: the reporter's harness reserved 32k a turn and used about 2k,
+  and both sessions re-prefilled their whole history at 100 to 160 s on
+  every turn (`prompt 199574 (61632 cached)`; only the shared system
+  prompt survived). Now a follow-up whose region cannot grow runs in the
+  room the region has left, with `max_tokens` clamped to it, when that
+  room is at least the answer room (`max(1024, 15%)` of `max_tokens`, twice
+  that when the request thinks); the thinking budget moves down with the
+  clamp so the answer room is kept. The log says so (`kv pool: the region
+  at A this request resumes from cannot grow; the turn runs in the N
+  positions it has left (max_tokens 32768 -> 30521)`), the request line
+  ends with `max_tokens clamped 32768 -> 30521`, and `timings` carries
+  `max_tokens_clamped_from` and `max_tokens_clamped_to`. At the reporter's
+  shape (1/8 scale) both sessions now read 99% cached on every turn with
+  nothing forgotten, where 0.11.4 forgot one of them between every turn.
+- **A conversation's rows move to the request's span rather than being
+  copied and left behind.** When a turn resumes from a held region whose
+  longest entry it continues and needs a fresh span (the region cannot
+  grow and has no room left, or the conversation was forked), the rows are
+  moved (`kv pool: moved the N rows this request resumes from, region A ->
+  B ... the old region is free`) instead of copied with the old region
+  kept. The stale duplicates those copies left could not be told from a
+  live conversation by the least-recently-used rule, and with a small
+  reservation a live session was forgotten for one by its fifth turn; that
+  arm now stays warm throughout. A fork's original that never returns is
+  freed the moment the fork resumes. A region another request is decoding
+  in is still copied, as before.
+- **The pool reports its own occupancy** (issue #73, @ker2x). Every
+  `serve_api:` request line now carries the cached share of the prompt, the
+  prefill rate over the tokens actually processed, and the pool's
+  occupancy as the engine reports it (`prompt 59498 (58013 cached, 97.5%),
+  prefill 2.29s = 648 t/s | ... | pool 412224/655360 63%`). `/cache` adds
+  `token_hit_rate` (prompt tokens the cache covered over every prompt token
+  seen; `hit_rate` counts requests) and, under `pool`, `positions`, `used`,
+  `usage_ratio`, `busy_regions`, `held_regions`, `room_clamped`, `moved`.
+  `/metrics`' `llamacpp:kv_cache_tokens` and `kv_cache_usage_ratio` are the
+  engine's occupancy (positions held in every region, busy and held); before
+  this they counted what the requests holding a front-end slot had asked
+  for, admitted or not, which read 913k against a 655k pool in #74's log.
+  That figure keeps a name of its own, `halogen:kv_pool_reserved_tokens`,
+  beside `halogen:kv_pool_positions`. No new flag; nothing on the decode
+  path. A turn that is not clamped generates exactly what it did; a
+  clamped one has a smaller budget and says so.
+
+### Declined
+
+- `HALOGEN_CACHE_IDLE_S`, time-based eviction of idle conversations (issue
+  #74). The reproduction showed the mechanism was placement, not idleness,
+  and the eviction order already forgets the least recently touched region
+  first, which a dead conversation is by construction. A sweep by wall
+  clock could only free positions nothing was waiting for, or evict a
+  conversation that comes back after the timeout. The fork case the request
+  named is covered by the move above.
+
 ## 0.11.4
 
 ### Fixed
