@@ -108,7 +108,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.6
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.7
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -132,7 +132,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.6
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.7
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -713,8 +713,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.6 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.6 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.7 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.7 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -857,7 +857,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -e HALOGEN_CHECKPOINT=/models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
   -v ~/gguf-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.6
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.7
 ```
 
 Name any shard of a split; the siblings are found by name. With
@@ -1071,6 +1071,22 @@ Generation speed follows a conversation's own length, not the pool: a short
 chat in a 1M-position pool runs at short-chat speed, and three conversations
 at 250k each generate at about 17 tokens per second apiece.
 
+**Sizing for a fan-out harness** (a parent that runs subagents in parallel,
+issue #75). Every live conversation holds `prompt + max_tokens` between its
+turns, so the pool must hold their sum: `pool >= sum over live conversations
+of (prompt + max_tokens)`, with `max_tokens` the client's, not the server
+default, when the client sends one. A subagent's prompt grows by the whole
+of each turn's generation when the harness replays the reasoning into the
+next request (Pi with `reasoning: true` does; the Qwen template keeps it),
+so a child that thinks for 25k tokens a turn under a 32k budget grows by
+about 26k a turn: a parent at 50k and two children at 80k each start at
+`82k + 112k + 112k = 306k` and pass the default 524,288 by their fifth turn.
+When they do, a move cannot help and one conversation is forgotten by the
+least-recently-used rule; the log says which. The levers are the pool
+(`786432` holds that shape for about four more turns, by which point the
+children are near the 262k context in any case), the client's budget (a
+harness that uses 2k of 32k can send 8k), and fewer parallel subagents.
+
 One cost the pool does carry. A larger pool leaves less RAM for the model's
 file cache, so the first prompt after a restart reads its rows of the lookup
 table from disk. Before 0.6.3 those rows were read one at a time and a
@@ -1173,7 +1189,21 @@ request waited for room that could never appear, with the health probe
 answered throughout (issue #68). A request that waits for a *busy*
 conversation to retire says so once in the log (`kv pool: request N waits
 for M positions ...`), and `/cache` reports it under `pool`
-(`waiting_for_room`, `waiting_s`, `relocated`, `cold_resorts`).
+(`waiting_for_room`, `waiting_s`, `relocated`, `cold_resorts`). Since
+0.11.7 that move is the FIRST thing tried when a region cannot grow, not the
+last: the conversation's own span counts as free, its rows move into any
+span that holds them, overlap or not (the copy goes in block-aligned chunks
+in the safe direction, `moved the N rows ... in 12.3 ms`), and when held
+neighbours are what stand in the way they are moved up against the next
+busy region so the region grows in place (`kv pool: ... moved N held
+regions ... grows in place (no loss)`, counted as `packed`). Only after
+every no-loss step fails is another conversation forgotten, and
+`cold_resorts` reads 0 from 0.11.7 on. Before that, a harness fanning out
+two subagents beside a parent (issue #75) had the parent forgotten on every
+child re-bind (with both children decoding, the parent's region was the
+only one the least-recently-used rule could reach) and then the children
+forgetting their own rows on alternate turns; the same workload fails the
+same way on 0.11.4, so it was the allocator, not the 0.11.5 change.
 
 A conversation keeps its whole reservation between turns, and since 0.11.5
 its next turn uses it. A follow-up whose region cannot grow (another
@@ -1185,9 +1215,14 @@ request resumes from cannot grow; the turn runs in the N positions it has
 left (max_tokens 32768 -> 30521)`), the request line ends with `max_tokens
 clamped 32768 -> 30521`, and the response's `timings` carries
 `max_tokens_clamped_from` and `max_tokens_clamped_to`, so a `finish_reason`
-of `length` on such a turn is legible. When the room is smaller than that,
-or the conversation resumes from a region another request is decoding in,
-the rows are copied to a fresh span as before, and since 0.11.5 a held
+of `length` on such a turn is legible. Since 0.11.7 the clamp comes AFTER
+the moves above: it runs only when no span anywhere holds the region, so a
+harness whose turns use their budget keeps the whole budget at the cost of
+a copy (issue #74's own shape now runs warm with zero evictions and no
+clamp, its two sessions leapfrogging by a 7 ms copy a turn), and the clamp
+remains for a pool with nothing left to move. When the room is smaller than the
+answer room, or the conversation resumes from a region another request is
+decoding in, the rows are copied to a fresh span, and since 0.11.5 a held
 region whose longest entry the request resumes from is *moved* (`kv pool:
 moved the N rows this request resumes from, region A -> B ... the old
 region is free`) rather than copied and left behind, so a stale duplicate

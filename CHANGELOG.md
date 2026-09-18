@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.11.7
+
+### Fixed
+
+- **A harness fanning out subagents no longer loses the parent's or the
+  children's cache when the pool has the room** (issue #75, @myliuyx). With
+  one parent and two children busy at once, each child turn using most of
+  its reservation, the pool's no-room path forgot the parent on every child
+  re-bind (with two children decoding, the parent's region was the only one
+  the least-recently-used rule could reach), and once the parent was gone
+  the children forgot their own rows on alternate turns: the last resort
+  that moves a conversation's rows into the free span ran cold whenever
+  that span overlapped the rows' old place, which is exactly the case of a
+  region moving down into the hole below itself. The report called it a
+  0.11.5 regression; the same workload at 1/8 scale fails the same way on
+  0.11.4 (both children cold at turn 5, the parent cold from turn 2), so
+  pinning back gains nothing. Now the no-room path takes its no-loss steps
+  first and retries them after every eviction: the region grows in place;
+  a fresh span holds a move; the conversation's own span counts as free
+  and its rows move into a span that includes it, overlap or not (the copy
+  goes in block-aligned chunks in the safe direction); held neighbours are
+  moved up against the next busy region so the region can grow in place
+  (`kv pool: ... moved N held regions ... grows in place (no loss)`); then
+  the 0.11.5 clamp (a smaller budget, no copy); and only then does another
+  conversation get forgotten. The clamp used to come before the moves, so a
+  harness whose turns use their budget had them cut at the room left
+  (`finish_reason: length`) where a copy of milliseconds keeps the whole
+  budget; it no longer does. The log line for a move carries its time
+  (`moved the N rows ... in 12.3 ms`), `/cache.pool` gains `packed`, and
+  `cold_resorts` reads 0 from here on. **Sizing still applies:** three
+  conversations need `pool >= sum over live conversations of (prompt +
+  max_tokens)`, and a child's prompt grows by the whole of each turn's
+  generation when the harness replays the reasoning; the README's memory
+  section has the arithmetic. Reproduced at 1/8 scale (one parent with a
+  step of growth, two children on their own threads each generating 3,100
+  of a 4,096 reservation, six turns) on the 0.11.4 and 0.11.6 images and
+  gated on the fix, plus a text gate for the overlapping copy (the moved
+  rows produce the same greedy continuation as the unmoved ones, byte for
+  byte).
+
 ## 0.11.6
 
 ### Added
