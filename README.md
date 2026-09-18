@@ -1178,8 +1178,8 @@ are the two levers; stopping other resident workloads is the third.
 `HALOGEN_MAX_TOK` (default 32,768, capped at the context) is the widest single
 prefill call, and it sizes the working memory the server holds beside the
 pool, which is a good deal more than the GEMM arena alone: the startup
-line's `working memory` reads **21.3 GiB at 32,768, 12.5 GiB at 16,384 and
-8.1 GiB at 8,192** on the 0.11.4 image. Halving it gives back 8.8 GiB for
+line's `working memory` reads **21.3 GiB at 32,768 and 12.5 GiB at 16,384**
+on the 0.11.4 image. Halving it gives back 8.8 GiB for
 about 9% of prefill speed, a long prompt read in more pieces, and the
 answer byte-identical. That made it the lever on the same reporter's next
 two boxes (issue #35), both shared with other work and both already
