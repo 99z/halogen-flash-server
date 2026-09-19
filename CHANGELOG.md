@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.11.10
+
+### Added
+
+- **`HALOGEN_CACHE_PRUNE_OLD=1` removes the other builds' cache subtrees at
+  startup** (issue #78, @eemin). With `HALOGEN_CACHE_DIR` set, each engine
+  build, weights file, context size and numeric setting keeps its own
+  subtree there, and `HALOGEN_CACHE_DISK_GIB` bounds only the current one,
+  so an upgrade day left 29.5 GB of files no build would read again beside
+  the live 8.5 GB. The default keeps them (a rollback finds its cache warm).
+  With the flag, after the engine has named its own subtree it removes the
+  others and the startup log names each one with its size, then says how
+  much was freed. Only a directory the cache itself wrote is a candidate (a
+  sixteen-hex name holding a `fingerprint` file); anything else under the
+  directory is left alone and counted, as before.
+- **Third-party GGUFs whose small tensors are F16 load** (issue #20's later
+  report, @Syakyr; the Hugging Face thread's "any gguf version"). unsloth's
+  files keep the model's small F32 tensors at F32; bartowski's and
+  orcarouter's IQ4_XS write one of them, `blk.1.ple_conv1d.weight`, as F16,
+  and the engine refused the whole file for it. F16 is read now where the
+  engine's own destination for the tensor is bf16: the values are widened
+  exactly and the repack's existing check that every value is bf16 clean
+  still applies, so the file's values arrive with their bits intact. What
+  the quantizer's F16 step already rounded stays rounded: 101 of that
+  tensor's 40,960 values sit under F16's normal range, and a file that
+  carries them at F16 carries them on F16's grid. Nothing changes for
+  unsloth's files: a synthetic copy of UD-IQ4_XS with that one tensor
+  rewritten to F16 repacks every other tensor byte for byte the original,
+  and that one exactly as the reference tool reads it. A llama.cpp draft
+  head beside such a file (`...-MTP-draft.gguf`)
+  is still not the engine's head: `HALOGEN_MTP_HEAD` pointing at one is
+  refused in two seconds with the name of the file that is.
+
+### Fixed
+
+- **A served run no longer rewrites the baked tuning plan at a clean exit.**
+  Under the shipped `HALOGEN_MATMUL_ALGOS=1` a GEMM shape outside the plan's
+  buckets takes the library's first pick and nothing is measured; the plan
+  was marked dirty for it anyway, and a clean exit wrote it back with the
+  unmeasured buckets added, moving the file's size and time, which the disk
+  cache's fingerprint includes. 0.11.9 read the plan from a copy so the
+  baked file could not move; the engine now does not mark it dirty for a
+  bucket it did not time. A tuning run (`ALGOS` above 1) still records
+  every bucket; an absent or stale file is still written.
+
+### Documentation
+
+- `HALOGEN_REASONING_EFFORT`'s text says all three mappings, `medium` to
+  `medium` included (issue #76, @ker2x).
+
 ## 0.11.9
 
 ### Fixed

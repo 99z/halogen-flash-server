@@ -114,7 +114,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.9
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.10
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -138,7 +138,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.9
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.10
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -273,10 +273,10 @@ much. Hard reasoning problems can genuinely exceed 8192: pass a larger budget,
 or `"reasoning_effort": "low"` to make the model think less. Accepted efforts
 are `minimal`, `low`, `medium`, `high` and `xhigh`; the model's own default is
 `xhigh`. The chat template itself knows three levels, so the five names fold
-onto them: `minimal` and `low` are `low`, `high` and `xhigh` are `xhigh`, and
-the startup line and `/health` report the level the template will see (#71
-asked why `high` printed as `xhigh`). `medium` is the one step down from the
-default. `"reasoning_effort": "none"` turns thinking off for that request
+onto them: `minimal` and `low` are `low`, `medium` is `medium`, `high` and
+`xhigh` are `xhigh`, and the startup line and `/health` report the level the
+template will see (#71 asked why `high` printed as `xhigh`; #76 asked for
+the middle one to be said). `medium` is the one step down from the default. `"reasoning_effort": "none"` turns thinking off for that request
 (the same as `chat_template_kwargs: {"enable_thinking": false}`, and
 `reasoning: {"effort": "none"}` on `/v1/responses`).
 
@@ -624,7 +624,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_KV_POOL_POSITIONS=262144 \
   -e HALOGEN_KV_SLOTS=2 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.9
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.10
 ```
 
 **The smallest footprint at the full context.** The prefill arena halves.
@@ -640,7 +640,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_KV_SLOTS=2 \
   -e HALOGEN_MAX_TOK=16384 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.9
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.10
 ```
 
 **If 131k of context is enough.** The pool cannot be smaller than one
@@ -656,7 +656,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_KV_SLOTS=2 \
   -e HALOGEN_MAX_TOK=16384 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.9
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.10
 ```
 
 Two things hold for all of them. The lookup table (the n-gram embedding,
@@ -829,8 +829,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.9 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.9 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.10 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.10 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -973,7 +973,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -e HALOGEN_CHECKPOINT=/models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
   -v ~/gguf-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.9
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.10
 ```
 
 Name any shard of a split; the siblings are found by name. With
@@ -991,9 +991,22 @@ small set times a per-block scale, which is the whole `IQ4_NL` / `IQ4_XS` /
 output in those types. Since 0.11.6 the engine reads the K-quant blocks
 `Q4_K`, `Q5_K` and `Q5_1` the same way, as their exact affine planes, which
 is unsloth's `UD-Q4_K_XL` build. Only `Q4_1`, `Q5_0`, `Q2_K`, `Q3_K` and the
-IQ2/IQ1/F16 families are **refused by name at startup**, before anything is
+IQ2/IQ1 families are **refused by name at startup**, before anything is
 loaded, because reading them needs kernels for their block layouts rather
 than a repack, and a lossy fallback would make "the same file" untrue.
+
+The small tensors that unsloth keeps at F32 come out of other quantizers at
+F16 (bartowski's and orcarouter's IQ4_XS files carry one,
+`blk.1.ple_conv1d.weight`). Since 0.11.10 the engine reads F16 wherever its
+own destination for the tensor is bf16: the values are widened exactly and
+the repack's check that every value is bf16 clean still applies, so the file's
+values arrive with their bits intact. What the quantizer's own F16 step
+already rounded stays rounded: in this tensor 101 of 40,960 values sit under
+F16's normal range (the smallest is 4.8e-8), and a file that carries them at
+F16 carries them rounded to F16's grid. Such files usually come with a
+llama.cpp draft head beside them (`...-MTP-draft.gguf`); that is not the
+head this engine runs, and `HALOGEN_MTP_HEAD` pointing at one is refused at
+once with the name of the file that is (`qwen38-flash-next-mtp.hgn`, above).
 
 **The short version: the GGUF costs decode and 4 GiB of RAM, and nothing
 else.** Same prefill, better perplexity, 24 GB less disk; serial decode about
@@ -1444,6 +1457,14 @@ What it stores is about 27 KiB per token of context: 0.9 GB at 32k, 2.7 GB at
 unbounded). The directory must be on a real filesystem that accepts direct
 I/O; a tmpfs or an overlay is refused with a message, and the cache stays in
 memory only.
+
+Each build of the engine, each weights file and each context size keeps its
+own subtree of the directory, and the bound above applies to the current one
+only: an upgrade leaves the previous build's subtree behind, readable by
+nothing but that build. The startup log counts them (`N other
+configuration(s) hold X GiB there`). `HALOGEN_CACHE_PRUNE_OLD=1` removes
+them at startup and names each one with its size (0.11.10, issue #78); the
+default keeps them so a rollback finds its cache warm.
 
 Two things worth knowing:
 

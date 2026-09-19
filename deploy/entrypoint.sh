@@ -524,6 +524,16 @@ check_gguf() {
       echo "  once with HALOGEN_DOWNLOAD set and the models volume mounted read-write." >&2
       exit 1; }
   fi
+  # 0.11.10 (issue #20): a llama.cpp MTP draft GGUF beside a third-party
+  # quantization is not the engine's head file; the engine would refuse it
+  # after the repack. Say so here, in 2 s, and name the file that is.
+  if [ "$(head -c 4 "$head" 2>/dev/null)" != "HGN1" ]; then
+    echo "halogen: HALOGEN_MTP_HEAD=$head is not the engine's draft head file (its first bytes are not HGN1)." >&2
+    echo "  A GGUF draft head (…-MTP-draft.gguf, llama.cpp's) is not read by this engine. The head it runs is" >&2
+    echo "  its own qwen38-flash-next-mtp.hgn (1.4 GiB) from the weights repo: put it beside the GGUF, point" >&2
+    echo "  HALOGEN_MTP_HEAD at it, or start once with HALOGEN_DOWNLOAD set and the models volume read-write." >&2
+    exit 1
+  fi
   export HALOGEN_MTP_HEAD="$head"
   echo "halogen: draft head $head ($(du -h "$head" | cut -f1))"
   case "${HALOGEN_GGUF_CACHE:-}" in
@@ -789,8 +799,8 @@ wd_gtt_gib() {
 # Liveness is the MAIN thread's state, not the worst thread's: after SIGKILL
 # the other threads sit in D for a moment while the kernel releases 66 GiB of
 # registrations, and the worst-state read (which is what the watchdog wants)
-# called a dying engine "still alive, state D" at 0 s (found by hand on
-# 0.11.9-rc4). A zombie main thread is reaped by `wait`, not alive.
+# called a dying engine "still alive, state D" at 0 s (found by hand while
+# 0.11.9 was gated). A zombie main thread is reaped by `wait`, not alive.
 wd_main_state() {
   local f="${_hg_proc:-/proc}/$1/task/$1/stat"
   [ -r "$f" ] || { echo "?"; return 0; }

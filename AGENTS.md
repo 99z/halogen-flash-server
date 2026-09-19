@@ -39,7 +39,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.9
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.10
 ```
 
 - On Docker, `--group-add keep-groups` is `--group-add video --group-add render`.
@@ -89,7 +89,8 @@ whether it starts and how it behaves:
   prefills only its new tokens. An answer that resumes from the cache is
   not always byte-identical to a cold one; `=1` saves only at fixed
   checkpoints and is, for evaluation and regression suites.
-  `HALOGEN_CACHE_DIR` keeps the cache across a restart.
+  `HALOGEN_CACHE_DIR` keeps the cache across a restart;
+  `HALOGEN_CACHE_PRUNE_OLD=1` removes other builds' subtrees there at startup.
 - **This server holds most of a 128 GB host.** Read the startup line `host
   memory left for everything else` and believe it: `free` and `MemAvailable`
   overstate free memory by about 68 GiB, the size of the locked weights.
