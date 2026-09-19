@@ -1,5 +1,88 @@
 # Changelog
 
+## 0.11.9
+
+### Fixed
+
+- **The watchdog no longer kills an engine that is silent inside the
+  kernel** (issue #79, @lory9995; issue #35). On a host short of contiguous
+  memory the engine stops for minutes inside a page fault or an allocation
+  while the kernel compacts memory for it, answers nothing, and comes back;
+  the container's watchdog counted that as a wedge and took the container
+  down at 180 s, saying in the same breath that a slow host is not a wedge.
+  On #79's host that kill landed twice on an engine in that state, and the
+  driver then kept the engine's GPU memory after the process was gone (35
+  GiB of GTT with nothing alive, a kernel worker in `svm_range_restore_work`
+  in D), so every later start hung at `reserving the KV pool` until the host
+  rebooted, with the restart policy starting the next one into the same
+  wall. Before a silent probe counts, the watchdog now reads the engine's
+  thread states in `/proc` and the kernel's `compact_stall` counter in
+  `/proc/vmstat`; a thread in uninterruptible sleep, or compaction advancing
+  since the last probe, is logged as `not counted as a wedge` and the clock
+  restarts when it ends. A wedge on a quiet host (threads running, no
+  compaction, no answer) is taken down at the same 180 s as before, and the
+  line says which case it saw. The same end state has been reached on three
+  other hosts by other unclean exits (#34's two machines, our own gate
+  machine), so the README's paragraph on the three amdgpu flags no longer
+  says leaving them off avoids it; it does not.
+- **A start says what the GPU is already holding, and refuses what cannot
+  fit** (issue #79). Before the engine starts, the container reads the
+  driver's own counters (`mem_info_gtt_used` and `_total` under the card's
+  sysfs node, and `/sys/class/kfd/kfd/proc`, the processes holding the GPU)
+  and prints `GTT in use before this start: N GiB of M (F free; this start
+  puts about K GiB there)`. Tens of GiB in use with no process holding the
+  GPU is memory a previous engine's exit did not give back, and the line
+  after it says so and what to do (check `fuser -v /dev/kfd` on the host,
+  then reboot; removing containers does not release it). Held by another
+  process, it is a note. Less free than the pool and the prefill arena need
+  is a refusal at once, since a start that cannot place its pool blocks
+  inside the driver instead of failing. The `still loading` heartbeat and
+  the shutdown line carry the engine's state and the GTT figure, so a report
+  of a hung start has the numbers in it.
+- **`/cache` during a long cold prefill answered 500** (owed since 0.11.5).
+  The engine reports its counters between rounds, and one 32k prefill chunk
+  is longer than the route's 10 s wait. It now answers the last counters it
+  had, with `stale_s` set to their age, and 503 with a reason if it has
+  none yet.
+- **The request line prints `= N t/s` for the prefill only when at least
+  2,048 tokens were processed** (owed since 0.11.5, said on #73 and #74). A
+  warm follow-up that processed 257 tokens in 1.20 s printed `= 214 t/s`,
+  which is one chunk's fixed cost and not a speed, and was read as one. Below
+  the threshold the line says `(257 new)`; `timings` is unchanged.
+- **`evicted` on `/cache` counted the entries a follow-up drops to take its
+  region over** (0.11.8's takeover, issue #75). They are `dropped` now;
+  nothing a later request could have hit was lost, and `evicted` is back to
+  entries forgotten for room.
+- **The pre-flight memory estimate sized every GGUF as UD-IQ4_XS** (issue
+  #80, @philtheriver). "Roughly 72 GiB of weights" was that file's repacked
+  size; the K-quant `UD-Q4_K_XL` repacks to 78 to 80 GiB, and on a 122 GiB
+  box the estimate said 27 GiB to spare while the engine, correctly, refused
+  the last pin 2 GiB under its 16 GiB floor, under a restart policy, fifty
+  times. The check now reads the GGUF's file type from the header (15 = a
+  K-quant, 80 GiB; 30 = IQ4_XS, 72) and sizes the working memory by
+  `HALOGEN_MAX_TOK` (21.3 GiB at 32768, 12.5 at 16384; it had said "11 GiB
+  of scratch" since before the arena was measured), and its warning names
+  the floor and the lever. The engine's refusal is now the summary: how far
+  short, and the levers in the order worth trying (`HALOGEN_MAX_TOK=16384`,
+  the pool, host memory, `PIN_TRUNK=0` last). `HALOGEN_MAX_TOK=16384` boots
+  that box today.
+- **The takedown path had never run on a non-zero exit.** The container's
+  `set -e` ended the entrypoint the moment its `wait -n` returned the
+  watchdog's status or a crashed engine's, so "a component exited; shutting
+  down", the SIGTERM to the engine and the wait after it had never run on a
+  wedge; the runtime ended the engine with the pid namespace. Now: SIGTERM
+  and the engine's own exit, 30 s, then SIGKILL, 30 s, then a line that says
+  the engine is inside the kernel and the host needs a reboot. The shutdown
+  line carries the GTT figure after the exit.
+
+### Documentation
+
+- `HALOGEN_ENGINE_WATCHDOG_S` is in the flag reference; it had been named by
+  the container's own message and two issue replies and by nothing else.
+- The README's host settings section, the shared-host section and a new
+  troubleshooting entry (a start that hangs at `reserving the KV pool`)
+  carry the four occurrences and the check.
+
 ## 0.11.8
 
 ### Fixed

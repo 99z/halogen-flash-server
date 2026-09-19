@@ -186,7 +186,32 @@ kv_budget_note() {
   # so was printed on the line below in every such report and nothing
   # compared it to MemTotal. This does. Informational; the pool is not
   # resized, because below one context there is no smaller pool to pick.
-  local wt="68 GiB"; if is_gguf; then wt="72 GiB (an 8-bit GGUF trunk, repacked into RAM)"; fi
+  # PUBLIC ISSUE #80: THE GGUF ESTIMATE IS BY FILE TYPE, NOT ONE CONSTANT.
+  # "72 GiB" was unsloth's UD-IQ4_XS repacked (file_type 30); the K-quant
+  # build the engine has read since 0.11.6 (UD-Q4_K_XL, file_type 15)
+  # repacks to 78 to 80 GiB, and a 122 GiB box that fit the first by 22 GiB
+  # missed the pin floor with the second by 2 while this line said it had 27
+  # to spare. The engine reads the exact figure from the header before it
+  # allocates anything (`... GiB of resident weights once repacked`); this
+  # is the same header, read here so the warning below can fire before the
+  # engine spends 30 s repacking into a start that will refuse.
+  local wt="68 GiB" w_gib=68 ft=""
+  if is_gguf; then
+    ft=$(gguf_file_type "$HALOGEN_CHECKPOINT")
+    case "$ft" in
+      15) wt="80 GiB (a K-quant GGUF trunk, file type 15, repacked into RAM)"; w_gib=80 ;;
+      30) wt="72 GiB (an 8-bit GGUF trunk, file type 30, repacked into RAM)"; w_gib=72 ;;
+      *)  wt="72 GiB or more (a GGUF trunk of file type ${ft:-unknown}, repacked into RAM; measured for types 30 and 15 only)"; w_gib=72 ;;
+    esac
+  fi
+  # The working memory beside the pool, as measured on 0.11.4 (issue #35):
+  # 21.3 GiB at HALOGEN_MAX_TOK 32768 and 12.5 at 16384, so a fixed 4.6 plus
+  # a prefill arena linear in max_tok. This line said "11 GiB of scratch"
+  # until 0.11.9, a number from before the arena was measured.
+  local scratch_gib tower_gib=0
+  scratch_gib=$(awk -v mt="$ENG_MAX_TOK" 'BEGIN{printf "%.1f", 4.6 + 16.7 * mt / 32768}')
+  [ -n "${HALOGEN_VISION_TOWER:-}" ] && [ "${HALOGEN_VISION_TOWER:-0}" != "0" ] && tower_gib=0.84
+  w_gib=$(awk -v w="$w_gib" -v s="$scratch_gib" -v t="$tower_gib" 'BEGIN{printf "%.1f", w + s + t}')
   used_gib=$(awk '/MemTotal/{t=$2} /MemAvailable/{a=$2} END{printf "%.1f", (t-a)/1048576}' /proc/meminfo 2>/dev/null || echo "0")
   if awk -v u="$used_gib" 'BEGIN{exit !(u >= 10)}'; then
     echo "halogen: WARNING ${used_gib} GiB of host RAM is in use before this server starts. The server sizes itself from the machine's total and leaves a fixed" \
@@ -197,20 +222,132 @@ kv_budget_note() {
   if [ "${HALOGEN_KV_POOL:-1}" = "0" ]; then
     echo "halogen: KV budget ${ENG_SLOTS} slot(s) x ${ENG_CTX} ctx = ${kv_gib} GiB" \
          "(~26 KiB/position/slot, HALOGEN_KV_POOL=0) + ${cache_gib} GiB prompt cache in RAM${HALOGEN_CACHE_FILE:+ (snapshot on file)}, on top of roughly ${wt}" \
-         "of weights and 11 GiB of scratch. Those last two are estimates for this pre-flight check; the engine prints its measured figures once loaded," \
+         "of weights and ${scratch_gib} GiB of working memory (HALOGEN_MAX_TOK ${ENG_MAX_TOK}). Those last two are estimates for this pre-flight check; the engine prints its measured figures once loaded," \
          "including the large lookup table it reads from disk and never holds. MemAvailable now ${avail_gib} GiB."
   else
     echo "halogen: KV budget ${ENG_SLOTS} slot(s) over one ${ENG_POOL}-position pool (each request up to ${ENG_CTX}) = ${kv_gib} GiB" \
          "(~28 KiB/position incl. block scratch + ~115 MiB/slot) + ${cache_gib} GiB prompt cache in RAM${HALOGEN_CACHE_FILE:+ (snapshot on file)}, on top of roughly ${wt}" \
-         "of weights and 11 GiB of scratch. Those last two are estimates for this pre-flight check; the engine prints its measured figures once loaded," \
+         "of weights and ${scratch_gib} GiB of working memory (HALOGEN_MAX_TOK ${ENG_MAX_TOK}). Those last two are estimates for this pre-flight check; the engine prints its measured figures once loaded," \
          "including the large lookup table it reads from disk and never holds. MemAvailable now ${avail_gib} GiB."
   fi
   # 0.7.0: a GGUF trunk is repacked into RAM in full and its 8-bit layers
   # are larger than the engine's own checkpoint's: ~72 GiB for unsloth's
-  # UD-IQ4_XS against ~68 for the .hgn. The engine prints the exact figure.
-  local w_gib=80; if is_gguf; then w_gib=84; fi
-  awk -v kv="$kv_gib" -v cg="$cache_gib" -v av="$avail_gib" -v w="$w_gib" 'BEGIN{ if (av != "?" && kv+cg+w > av)
-    print "halogen: WARNING: that budget is close to or over what this host has free.\n  If startup ends in \"HIP … out of memory\", lower HALOGEN_KV_POOL_POSITIONS (the pool) or HALOGEN_MAX_TOK (the prefill arena);\n  a 1,048,576-position pool fits only with HALOGEN_MAX_TOK=16384." > "/dev/stderr" }'
+  # UD-IQ4_XS against ~68 for the .hgn, ~80 for UD-Q4_K_XL (#80). `w_gib`
+  # is that plus the working memory and the tower; the engine prints the
+  # exact figures. The pin floor (16 GiB of MemAvailable at the last pin) is
+  # the check that ends a start that is over, so it is in the sum and the
+  # warning names it and the lever that gave #80's box back 9 GiB. On #80's
+  # box this reads 129 against 119 for the K-quant (it refused at 14.4) and
+  # 120 against 119 for UD-IQ4_XS (it booted with 17.6 left): "close to".
+  awk -v kv="$kv_gib" -v cg="$cache_gib" -v av="$avail_gib" -v w="$w_gib" 'BEGIN{ if (av != "?" && kv+cg+w+16 > av)
+    print "halogen: WARNING: that budget is close to or over what this host has free (the engine refuses the last pin under 16 GiB of MemAvailable).\n  If startup ends in \"checkpoint: refusing to pin\" or \"HIP ... out of memory\", lower HALOGEN_MAX_TOK to 16384 (the working memory, about 9 GiB back for about 9% of prefill speed)\n  or HALOGEN_KV_POOL_POSITIONS (the pool, ~29.5 KiB a position); a 1,048,576-position pool fits only with HALOGEN_MAX_TOK=16384." > "/dev/stderr" }'
+}
+
+# The GGUF's `general.file_type` (u32) from the first shard's header, or
+# nothing. Walks the KV table in order and stops at the key; it sits before
+# the tokenizer's arrays in every file we have read, so this is a few KB.
+# Any surprise (not a GGUF, a nested array, a short file) prints nothing and
+# the caller falls back to the unmeasured wording.
+gguf_file_type() {
+  python3 - "$1" 2>/dev/null <<'PY'
+import struct, sys
+SZ = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+try:
+    with open(sys.argv[1], "rb") as f:
+        if f.read(4) != b"GGUF":
+            sys.exit(0)
+        f.read(4)
+        _, nk = struct.unpack("<QQ", f.read(16))
+        def rs():
+            n, = struct.unpack("<Q", f.read(8)); return f.read(n)
+        def skip(t):
+            if t == 8:
+                rs()
+            elif t == 9:
+                et, = struct.unpack("<I", f.read(4)); n, = struct.unpack("<Q", f.read(8))
+                if et == 8:
+                    for _ in range(n): rs()
+                elif et == 9:
+                    raise ValueError("nested array")
+                else:
+                    f.seek(SZ[et] * n, 1)
+            else:
+                f.seek(SZ[t], 1)
+        for _ in range(nk):
+            k = rs(); t, = struct.unpack("<I", f.read(4))
+            if k == b"general.file_type" and t == 4:
+                print(struct.unpack("<I", f.read(4))[0]); sys.exit(0)
+            skip(t)
+except Exception:
+    pass
+PY
+}
+
+# PUBLIC ISSUE #79: WHAT THE GPU IS ALREADY HOLDING. On this chip every
+# allocation the engine makes on the GPU lands in GTT, which is system RAM
+# under the driver's own ceiling (ttm.pages_limit), and a start whose pool
+# cannot be placed there does not fail cleanly: it blocks inside the driver,
+# and if the driver is also holding a lock the process is unkillable. Four
+# hosts have reached that state (#34's two machines, this project's own gate
+# box, #79), each after a process holding the GPU ended while the driver had
+# work in flight (another model's exit, a bench's normal exit, a cancelled
+# request, a watchdog kill under a memory stall): the GTT (35 to 45 GiB,
+# measured on three of them) stayed allocated with no process alive and
+# every later start refused at the pin guard or hung at "reserving the KV
+# pool" until the host rebooted. Nothing inside a container can release it. The
+# container CAN say it is there before it commits, which is what this does:
+# the counters are the driver's own (mem_info_gtt_used and _total under the
+# card's sysfs node, readable through /sys where the runtime mounts it), and
+# /sys/class/kfd/kfd/proc lists every process holding the GPU, host-wide,
+# so "in use and nobody holds it" is readable from here. The weights do not
+# count here (a read-only file mapping registered in place, not a GTT
+# allocation); what the engine puts in GTT is the pool and its working
+# memory, about 36 GiB at the shipped defaults.
+gtt_note() {
+  local sys="${_hg_sys:-/sys}" f used="" total="" holders
+  for f in "$sys"/class/drm/card*/device/mem_info_gtt_used; do
+    [ -r "$f" ] || continue
+    used=$(cat "$f" 2>/dev/null) || continue
+    total=$(cat "${f%used}total" 2>/dev/null) || continue
+    [ -n "$used" ] && [ -n "$total" ] && break
+  done
+  if [ -z "$used" ] || [ -z "$total" ]; then
+    echo "halogen: GTT in use before this start: unknown (no amdgpu sysfs node is readable from this container)"
+    return 0
+  fi
+  # The pool and the O(1) state, as kv_budget_note sizes them, plus the
+  # prefill arena (16.7 GiB at HALOGEN_MAX_TOK 32768, linear in it). The
+  # rest of the working memory (~4.6 GiB measured on 0.11.4, issue #35) is
+  # left out on purpose: this refuses only what certainly does not fit.
+  local need_gib
+  need_gib=$(awk -v s="$ENG_SLOTS" -v c="$ENG_CTX" -v p="$ENG_POOL" -v pool="${HALOGEN_KV_POOL:-1}" -v mt="$ENG_MAX_TOK" \
+    'BEGIN{printf "%.1f", (pool=="0"?s*c*26624:p*29500+s*120586240)/1073741824 + mt/32768*16.7}')
+  local used_gib total_gib free_gib
+  used_gib=$(awk -v u="$used" 'BEGIN{printf "%.1f", u/1073741824}')
+  total_gib=$(awk -v t="$total" 'BEGIN{printf "%.1f", t/1073741824}')
+  free_gib=$(awk -v u="$used" -v t="$total" 'BEGIN{printf "%.1f", (t-u)/1073741824}')
+  holders="?"
+  if [ -d "$sys/class/kfd/kfd/proc" ] && [ -r "$sys/class/kfd/kfd/proc" ]; then
+    holders=$(ls "$sys/class/kfd/kfd/proc" 2>/dev/null | wc -l | tr -d ' ')
+  fi
+  echo "halogen: GTT in use before this start: ${used_gib} GiB of ${total_gib} (${free_gib} free; this start puts about ${need_gib} GiB there)"
+  if awk -v u="$used" 'BEGIN{exit !(u >= 2147483648)}'; then
+    if [ "$holders" = "0" ]; then
+      echo "halogen: WARNING ${used_gib} GiB of GTT is in use and no process holds the GPU, as far as this container can see (/sys/class/kfd/kfd/proc is empty)." >&2
+      echo "  That is memory a previous engine's exit did not give back: the driver kept it (issue #79; four hosts, each after a GPU process ended while the driver had work in flight)." >&2
+      echo "  Removing and restarting containers does not release it. Check on the host: cat /sys/class/drm/card*/device/mem_info_gtt_used, and fuser -v /dev/kfd." >&2
+      echo "  If nothing holds /dev/kfd and the figure does not fall, reboot the host before starting this server; a start on top of it can hang at \"reserving the KV pool\" with the process unkillable." >&2
+    elif [ "$holders" != "?" ]; then
+      echo "halogen: NOTE ${used_gib} GiB of GTT is held by ${holders} process(es) on this host before this start (another model, or a previous engine still exiting). This server starts on what is left, and shares the GPU with them."
+    else
+      echo "halogen: NOTE ${used_gib} GiB of GTT is in use before this start (another model on this host, or a previous engine's memory the driver kept; /sys/class/kfd/kfd/proc is not readable here to tell which)."
+    fi
+  fi
+  if awk -v f="$free_gib" -v n="$need_gib" 'BEGIN{exit !(f < n)}'; then
+    echo "halogen: refusing to start: ${free_gib} GiB of GTT is free and this configuration needs about ${need_gib} GiB there." >&2
+    echo "  A start that cannot place its pool does not fail, it blocks inside the driver (issue #79). Free the GTT first (stop the other GPU workloads, or reboot if nothing holds it), or lower HALOGEN_KV_POOL_POSITIONS / HALOGEN_MAX_TOK to fit ${free_gib} GiB." >&2
+    exit 1
+  fi
 }
 
 # OPTIONAL model download. OFF unless HALOGEN_DOWNLOAD names a repo.
@@ -314,8 +451,34 @@ update_sidecar() {
   echo "  once with HALOGEN_DOWNLOAD set and the volume mounted read-write." >&2
 }
 
+# THE BAKED TUNING PLAN IS READ FROM A COPY, so the engine's exit cannot
+# rewrite it. `~Matmul` writes the plan back at a clean exit whenever a served
+# GEMM shape fell outside the baked buckets, and until 0.11.9 no container
+# had ever let the engine exit cleanly (the runtime ended it with the pid
+# namespace, the errexit above), so the file the image ships had never moved
+# under use. With the takedown written out it did, in the release gate:
+# after a `podman restart` the plan's size and mtime had changed, the prompt
+# cache on disk fingerprints the plan by both, and the restart's restore
+# missed with a fresh lineage beside the old one. The published plan is a
+# blessed measurement (478 buckets, one sha), not a scratch file; a copy
+# with its mtime kept (`cp -p`) reads identically, fingerprints identically
+# across restarts, and takes the write instead. A tuning run that names its
+# own file (the regeneration recipe) is untouched: only the baked path is
+# redirected.
+tuning_plan_copy() {
+  local baked=/opt/halogen/flash-tune.plan
+  [ "${HALOGEN_MATMUL_TUNING_FILE:-}" = "$baked" ] || return 0
+  [ -r "$baked" ] || return 0
+  if cp -p "$baked" /tmp/halogen-tune.plan 2>/dev/null; then
+    export HALOGEN_MATMUL_TUNING_FILE=/tmp/halogen-tune.plan
+  else
+    echo "halogen: could not copy the tuning plan to /tmp; the engine reads the baked file and may rewrite it at exit" >&2
+  fi
+}
+
 need_ckpt() {
   maybe_download
+  tuning_plan_copy
   [ -f "$HALOGEN_CHECKPOINT" ] || {
     echo "halogen: no checkpoint at $HALOGEN_CHECKPOINT" >&2
     echo "  mount it:  -v /path/to/models:/models:ro" >&2
@@ -324,6 +487,7 @@ need_ckpt() {
   if is_gguf; then check_gguf; else check_sidecar; fi
   check_vision
   kv_budget_note
+  gtt_note
 }
 
 # 0.7.0: BRING YOUR OWN GGUF. HALOGEN_CHECKPOINT may name a llama.cpp GGUF
@@ -535,7 +699,7 @@ wait_for_engine() {
     sleep 2; t=$((t + 2)); beat=$((beat + 2))
     if [ "$beat" -ge 60 ]; then
       beat=0
-      echo "halogen: still loading, ${t}s elapsed (the engine is alive; the startup lines above name the step)"
+      echo "halogen: still loading, ${t}s elapsed (the engine is alive, state $(wd_state "$pid"); GTT in use $(wd_gtt_gib) GiB; the startup lines above name the step)"
     fi
   done
 }
@@ -561,6 +725,114 @@ wait_for_engine() {
 #
 # 0 disables it. The engine's own SIGTERM path is used, so a clean shutdown
 # still writes what it writes.
+#
+# PUBLIC ISSUE #79 (and #35 before it): SILENCE INSIDE THE KERNEL IS NOT A
+# WEDGE, AND KILLING IT IS WHAT WEDGES THE DRIVER. On a host short of
+# contiguous memory the engine stops for minutes at a time inside a page
+# fault or an allocation while the kernel compacts memory for it: 100% of
+# one core, no output, no PING, and it clears on its own (#35's reporter
+# watched the silence reach 135 s and the engine come back, six times). The
+# text below said "this is a slow host and not a wedge" and then took the
+# container down anyway. On #79's host that kill landed twice on a process
+# with 66 GiB registered with the GPU while the driver had work in flight,
+# and left the driver holding the memory with no process alive: every later
+# start hung at "reserving the KV pool" until a reboot, the end state three
+# other hosts reached by other unclean exits (#34's two machines, this
+# project's own gate box). So the watchdog reads two
+# things the container can see before it counts a silent probe: the
+# engine's threads' states in /proc (a task in D is inside the kernel and
+# cannot answer anything), and the kernel's own compaction counter in
+# /proc/vmstat (compact_stall climbing while the engine is silent is the
+# stall the startup note describes). Silence under either is logged and NOT
+# counted, and the clock restarts when it ends: a wedged engine on a quiet
+# host is taken down at the same 180 s as before, and an engine that comes
+# back from a stall is never killed for it. What this cannot see is a wedge
+# on a host where some other process compacts memory without pause; there
+# the line it prints every 15 s says why it is waiting.
+wd_state() {
+  # The worst state among the engine's tasks: D if any is in uninterruptible
+  # sleep, else the main thread's. The comm field can contain spaces, so
+  # the state is read after the last ')'.
+  local proc="${_hg_proc:-/proc}" pid="$1" f st main="?"
+  for f in "$proc/$pid/task/"*/stat; do
+    [ -r "$f" ] || continue
+    st=$(sed 's/.*) //' "$f" 2>/dev/null | cut -d' ' -f1 || true)
+    [ "$st" = "D" ] && { echo D; return 0; }
+    [ "${f%/stat}" = "$proc/$pid/task/$pid" ] && main="$st"
+  done
+  echo "$main"
+}
+wd_compact() {
+  local proc="${_hg_proc:-/proc}"
+  awk '/^compact_stall /{print $2; exit}' "$proc/vmstat" 2>/dev/null || true
+}
+wd_gtt_gib() {
+  local sys="${_hg_sys:-/sys}" f
+  for f in "$sys"/class/drm/card*/device/mem_info_gtt_used; do
+    [ -r "$f" ] || continue
+    awk -v u="$(cat "$f" 2>/dev/null || echo 0)" 'BEGIN{printf "%.1f", u/1073741824}' || true
+    return 0
+  done
+  echo "?"
+}
+# THE TAKEDOWN, WRITTEN OUT. Found by 0.11.9's own release gate: under `set -e` the
+# `wait -n` below returned the watchdog's 1 (or a crashed engine's status)
+# and the script EXITED THERE, so "a component exited; shutting down", the
+# SIGTERM to the engine, and everything after it had never once run on a
+# non-zero exit; the runtime ended the engine with the pid namespace. This
+# is the path instead: SIGTERM and the engine's own exit, 30 s, then SIGKILL,
+# 30 s, then say what is left. A wedged engine's accept loop never reads the
+# flag its handler sets, so the SIGKILL is the one that lands; an engine in
+# D ignores both, and the line says so and names the reboot (issue #79). A
+# child that has exited is a zombie until reaped and `kill -0` still
+# succeeds on it, so liveness is the state in /proc, not the signal.
+# Liveness is the MAIN thread's state, not the worst thread's: after SIGKILL
+# the other threads sit in D for a moment while the kernel releases 66 GiB of
+# registrations, and the worst-state read (which is what the watchdog wants)
+# called a dying engine "still alive, state D" at 0 s (found by hand on
+# 0.11.9-rc4). A zombie main thread is reaped by `wait`, not alive.
+wd_main_state() {
+  local f="${_hg_proc:-/proc}/$1/task/$1/stat"
+  [ -r "$f" ] || { echo "?"; return 0; }
+  sed 's/.*) //' "$f" 2>/dev/null | cut -d' ' -f1 || echo "?"
+}
+wd_alive() { [ -d "${_hg_proc:-/proc}/$1" ] && [ "$(wd_main_state "$1")" != "Z" ]; }
+# The GTT figure after an exit, read once it stops falling: the driver
+# releases an engine's device memory a few seconds after the process is
+# gone (18 MB within 5 s on a healthy host), and a read at 0 s is the
+# engine's own figure whatever the driver is about to do. Capped at 6 s so
+# a `podman stop` (10 s before its SIGKILL) still ends with this line.
+wd_gtt_after_exit() {
+  local t=0 g
+  while [ $t -lt 6 ]; do
+    g=$(wd_gtt_gib)
+    case "$g" in "?") break;; esac
+    awk -v g="$g" 'BEGIN{exit !(g < 1.0)}' && break
+    sleep 1; t=$((t + 1))
+  done
+  echo "halogen: GTT in use after the engine exited: ${g:-?} GiB (${t}s after)" >&2
+  if [ "${g:-?}" != "?" ] && awk -v g="$g" 'BEGIN{exit !(g >= 2.0)}'; then
+    echo "halogen: WARNING the driver has not released this engine's device memory. If the figure does not fall (cat /sys/class/drm/card*/device/mem_info_gtt_used on the host), the next start will hang at \"reserving the KV pool\"; reboot the host first (issue #79)." >&2
+  fi
+}
+stop_engine() {   # stop_engine PID -> the engine's exit status (137 if it would not die)
+  local pid="$1" t=0 st rc=0
+  kill -TERM "$pid" 2>/dev/null || true
+  while wd_alive "$pid" && [ $t -lt 30 ]; do sleep 1; t=$((t + 1)); done
+  if wd_alive "$pid"; then
+    st=$(wd_state "$pid")
+    echo "halogen: the engine did not exit on SIGTERM within ${t}s (state ${st}); sending SIGKILL" >&2
+    kill -KILL "$pid" 2>/dev/null || true
+    t=0
+    while wd_alive "$pid" && [ $t -lt 30 ]; do sleep 1; t=$((t + 1)); done
+  fi
+  if wd_alive "$pid"; then
+    echo "halogen: the engine is still alive ${t}s after SIGKILL (state $(wd_state "$pid")): it is inside the kernel and nothing in this container can end it. GTT in use now: $(wd_gtt_gib) GiB. The host needs a reboot before the next start (issue #79)." >&2
+    return 137
+  fi
+  wait "$pid" 2>/dev/null || rc=$?
+  return "$rc"
+}
 engine_pong() {
   ( exec 3<>"/dev/tcp/127.0.0.1/${1}" || exit 1
     printf 'PING\n' >&3 || exit 1
@@ -580,27 +852,46 @@ engine_watchdog() {
   # also BLOCKS for the ping timeout, so counting `step` per iteration made the
   # threshold mean about three times what it says: measured 130 s to fire at a
   # 45 s setting. `last_ok` is the last time the engine actually answered.
-  local last_ok
+  local last_ok st cs_prev cs_now deferred=0
   last_ok=$(date +%s)
+  cs_prev=$(wd_compact)
   while kill -0 "$pid" 2>/dev/null; do
     sleep "$step"
     if engine_pong "$port"; then
       last_ok=$(date +%s)
+      cs_prev=$(wd_compact)
+      if [ "$deferred" -gt 0 ]; then
+        echo "halogen: the engine answered PING again after ${deferred}s of silence inside the kernel; not a wedge, nothing was taken down" >&2
+        deferred=0
+      fi
       continue
     fi
+    st=$(wd_state "$pid")
+    cs_now=$(wd_compact)
+    if [ "$st" = "D" ] || { [ -n "$cs_now" ] && [ -n "$cs_prev" ] && [ "$cs_now" -gt "$cs_prev" ]; }; then
+      deferred=$(( $(date +%s) - last_ok ))
+      if [ "$st" = "D" ]; then
+        echo "halogen: the engine has not answered PING for ${deferred}s: a thread is in uninterruptible sleep (state D, inside the kernel). Not counted as a wedge; this is the host short of memory, and killing the engine here is what leaves the driver holding its memory (issue #79)." >&2
+      else
+        echo "halogen: the engine has not answered PING for ${deferred}s: the kernel is compacting host memory (compact_stall +$(( cs_now - cs_prev )) since the last probe). Not counted as a wedge; it clears when the compaction does. Free host memory, or give this server a machine of its own." >&2
+      fi
+      last_ok=$(date +%s)
+      cs_prev="$cs_now"
+      continue
+    fi
+    cs_prev="$cs_now"
     silent=$(( $(date +%s) - last_ok ))
-    echo "halogen: the engine has not answered PING for ${silent}s" >&2
+    echo "halogen: the engine has not answered PING for ${silent}s (engine state ${st}, no compaction in progress)" >&2
     if [ "$silent" -ge "$limit" ]; then
       echo "halogen: the engine process is alive and has answered nothing for ${silent}s." >&2
       echo "  PING is answered between decode rounds, between the layers of a prefill, and" >&2
-      echo "  while the lookup table is being read, so on a healthy host this is a wedge." >&2
-      echo "  On a host short of RAM it is not: the table is read from disk (64 reads in" >&2
-      echo "  flight since 0.6.3) and the engine prints 'lookup table: ... took N s' when" >&2
-      echo "  that runs long." >&2
-      echo "  If that line appears above, this is a slow host and not a wedge: disable or" >&2
-      echo "  raise HALOGEN_ENGINE_WATCHDOG_S (0 = off) and free host memory. Otherwise," >&2
-      echo "  shutting the container down so a restart policy can recover it; please" >&2
-      echo "  report it with the log." >&2
+      echo "  while the lookup table is being read. Its threads are not inside the kernel" >&2
+      echo "  and the kernel is not compacting memory for it, so this is a wedge, not a" >&2
+      echo "  stall. GTT in use now: $(wd_gtt_gib) GiB." >&2
+      echo "  Shutting the container down so a restart policy can recover it. If the next" >&2
+      echo "  start hangs at 'reserving the KV pool', read its 'GTT in use before this" >&2
+      echo "  start' line: memory the driver kept after this kill needs a host reboot" >&2
+      echo "  (issue #79). Please report it with this log." >&2
       return 1
     fi
   done
@@ -632,14 +923,28 @@ start_engine() {
   else
     echo "halogen: engine watchdog OFF (HALOGEN_ENGINE_WATCHDOG_S=0)"
   fi
+  # ERREXIT OFF FROM HERE: this is a supervisor, and every status below is
+  # data (which child ended, how the engine died, whether a kill found its
+  # target), not a reason to stop. Under `set -e` the `wait -n` alone had
+  # ended the script on any non-zero status since 0.4.4, and a `kill` on an
+  # already-gone watchdog did the same once that was fixed; the `|| true`s
+  # stay as documentation of each, this is the rule.
+  set +e
   # shellcheck disable=SC2086
-  wait -n "$ENGINE_PID" $WATCHDOG_PID 2>/dev/null
-  kill -TERM "$ENGINE_PID" 2>/dev/null || true
-  [ -n "$WATCHDOG_PID" ] && kill -9 "$WATCHDOG_PID" 2>/dev/null
-  wait "$ENGINE_PID" 2>/dev/null
-  RC=$?
-  echo "halogen: engine exited (rc=$RC); shutting down" >&2
-  exit "$RC"
+  WRC=0; wait -n "$ENGINE_PID" $WATCHDOG_PID 2>/dev/null || WRC=$?
+  # `|| true` because this follows the final `&&`: when the watchdog is the
+  # component that exited, its pid is gone, the kill fails, and under
+  # `set -e` a failing command after the last `&&` ends the script (found
+  # by the 0.11.9 release gate, the second errexit in this path).
+  [ -n "$WATCHDOG_PID" ] && kill -9 "$WATCHDOG_PID" 2>/dev/null || true
+  # Reap it here, or bash prints "Killed engine_watchdog" into every clean
+  # stop's log when it notices later.
+  [ -n "$WATCHDOG_PID" ] && wait "$WATCHDOG_PID" 2>/dev/null || true
+  RC=0; stop_engine "$ENGINE_PID" || RC=$?
+  echo "halogen: engine exited (rc=$RC, the component that ended this: $WRC); shutting down" >&2
+  wd_gtt_after_exit
+  [ "$RC" -ne 0 ] && exit "$RC"
+  exit "$WRC"
 }
 
 # PUBLIC ISSUE #30: the HALOGEN_* request defaults (HALOGEN_TEMPERATURE,
@@ -723,12 +1028,26 @@ all)
   else
     echo "halogen: engine watchdog OFF (HALOGEN_ENGINE_WATCHDOG_S=0)"
   fi
+  # Errexit off from here: a supervisor's statuses are data (see start_engine).
+  set +e
   # shellcheck disable=SC2086
-  wait -n "$ENGINE_PID" "$API_PID" $WATCHDOG_PID
-  echo "halogen: a component exited; shutting down" >&2
-  kill -TERM "$ENGINE_PID" "$API_PID" 2>/dev/null || true
-  [ -n "$WATCHDOG_PID" ] && kill -9 "$WATCHDOG_PID" 2>/dev/null
-  wait || true
+  WRC=0; wait -n "$ENGINE_PID" "$API_PID" $WATCHDOG_PID || WRC=$?
+  echo "halogen: a component exited (rc=$WRC); shutting down" >&2
+  kill -TERM "$API_PID" 2>/dev/null || true
+  # `|| true` because this follows the final `&&`: when the watchdog is the
+  # component that exited, its pid is gone, the kill fails, and under
+  # `set -e` a failing command after the last `&&` ends the script (found
+  # by the 0.11.9 release gate, the second errexit in this path).
+  [ -n "$WATCHDOG_PID" ] && kill -9 "$WATCHDOG_PID" 2>/dev/null || true
+  # Reap it here, or bash prints "Killed engine_watchdog" into every clean
+  # stop's log when it notices later.
+  [ -n "$WATCHDOG_PID" ] && wait "$WATCHDOG_PID" 2>/dev/null || true
+  stop_engine "$ENGINE_PID" || true
+  wait "$API_PID" 2>/dev/null || true
+  # Issue #79: the figure the next start's "GTT in use before this start"
+  # line will read. A driver that kept this engine's memory shows here
+  # first, while the log that explains it is still the same log.
+  wd_gtt_after_exit
   exit 1
   ;;
 bench|sweep)

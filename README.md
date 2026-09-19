@@ -114,7 +114,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.8
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.9
 ```
 
 That is the whole thing. It fetches the weights on first start (118 GiB, so
@@ -138,7 +138,7 @@ podman run --rm -p 8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ipc=host --ulimit memlock=-1:-1 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.8
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.9
 ```
 
 The weights repo carries the tokenizer, so one `-v` is all either form needs.
@@ -418,13 +418,21 @@ meaning). Always on, no flag, no engine round trip.
 **Cache and pool occupancy in the log** (since 0.11.5; #73): every
 request's `serve_api:` line carries the cached share of its prompt, the
 prefill rate over the tokens actually processed, and the pool's occupancy
-as the engine reports it: `prompt 59498 (58013 cached, 97.5%), prefill 2.29s
-= 648 t/s | ... | pool 412224/655360 63%`. `GET /cache` adds
-`token_hit_rate` (prompt tokens the cache covered over every prompt token
-seen since the server started; `hit_rate` counts requests) and, under
-`pool`, `positions`, `used`, `usage_ratio`, `busy_regions` (a request
-decoding), `held_regions` (a warm conversation between turns, not a full
-pool), `room_clamped` and `moved`.
+as the engine reports it: `prompt 30828 (30803 cached, 99.9%), prefill 0.38s
+(25 new) | ... | pool 30976/524288 6%`. Since 0.11.9 the rate is printed
+only when at least 2,048 tokens were processed (the cold turn before that
+one read `prompt 30803, prefill 27.92s = 1103 t/s`); below that the line
+says how many were new and leaves the rate out, because a few hundred
+tokens in a second is one prefill chunk's fixed cost and not a speed, and
+two reports had read it as one. `timings` in the response is unchanged. `GET /cache` adds `token_hit_rate` (prompt tokens the
+cache covered over every prompt token seen since the server started;
+`hit_rate` counts requests) and, under `pool`, `positions`, `used`,
+`usage_ratio`, `busy_regions` (a request decoding), `held_regions` (a warm
+conversation between turns, not a full pool), `room_clamped` and `moved`.
+Since 0.11.9 `dropped` counts the entries a follow-up dropped to take its
+region over (they went under `evicted` in 0.11.8), and a `/cache` polled
+while the engine is inside a long cold prefill answers the last counters it
+had with `stale_s` set, where it used to answer 500 after ten seconds.
 
 **Structured output** (since 0.8.0; #14, #43). `response_format:
 {"type": "json_schema", "json_schema": {"name": ..., "schema": {...}}}` and
@@ -527,6 +535,20 @@ whatever asked for it, including this server, can stop for minutes at a time at
 100% of one core with no disk activity and no output. It is not a crash, it
 needs no restart, and it looks exactly like a hang.
 
+Since 0.11.9 the container's watchdog knows the difference. Before it counts
+a silent probe it reads the engine's thread states and the kernel's
+compaction counter, and silence with a thread in uninterruptible sleep or
+with `compact_stall` climbing is logged as `not counted as a wedge` and does
+not take the container down. It matters more than it sounds: on the host in
+issue #79 the old watchdog's kill landed on an engine in exactly that state,
+twice, and the driver then kept the engine's GPU memory after the process
+was gone, so every later start hung until the host rebooted (the end state
+issue #34's two machines and our own gate machine each reached by a
+different unclean exit). A restart policy turns that into a loop. If you run this server beside other
+work, read the watchdog's lines before trusting a restart policy to recover
+anything, and see [the host settings section](#the-host-settings-these-numbers-were-measured-on)
+for what a start on such a host says.
+
 The startup line says how much room is left, and a second line says why your
 own tools will disagree:
 
@@ -576,6 +598,14 @@ pool), and it does not depend on the machine; what is left does, so read the
 | pool 262,144, 2 slots, `MAX_TOK` 16384 | ~19 GiB | ~87 GiB | the above, and prefill about 9% slower |
 | context 131,072, pool 131,072, 2 slots, `MAX_TOK` 16384 | ~16 GiB | ~84 GiB | the above, and half the context |
 
+A GGUF adds to the "takes" column: unsloth's `UD-IQ4_XS` holds 72 GiB of
+weights instead of 68, and the K-quant `UD-Q4_K_XL` 78 to 80 GiB, so add 4
+or 12 GiB to every row. The engine refuses the last pin when it would leave
+under 16 GiB, and on a 122 GiB box the K-quant at the Quickstart's `MAX_TOK`
+lands 2 GiB under that floor (issue #80); `HALOGEN_MAX_TOK=16384` is the
+row that fits it. Since 0.11.9 the pre-flight check reads the GGUF's file
+type and sizes the estimate accordingly, and the refusal names the levers.
+
 Every recipe below assumes the weights are already in `~/halogen-models`
 (the Quickstart's first start put them there). On Docker, replace
 `--group-add keep-groups` with `--group-add video --group-add render`. With
@@ -594,7 +624,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_KV_POOL_POSITIONS=262144 \
   -e HALOGEN_KV_SLOTS=2 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.8
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.9
 ```
 
 **The smallest footprint at the full context.** The prefill arena halves.
@@ -610,7 +640,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_KV_SLOTS=2 \
   -e HALOGEN_MAX_TOK=16384 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.8
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.9
 ```
 
 **If 131k of context is enough.** The pool cannot be smaller than one
@@ -626,7 +656,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_KV_SLOTS=2 \
   -e HALOGEN_MAX_TOK=16384 \
   -v ~/halogen-models:/models:ro \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.8
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.9
 ```
 
 Two things hold for all of them. The lookup table (the n-gram embedding,
@@ -799,8 +829,8 @@ produced byte-identical output on every case.**
 Reproduce the numbers with the benchmarks baked into the image:
 
 ```bash
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.8 bench serial,mtp 256 low 3
-podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.8 sweep -p 8192,32768 -n 128
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.9 bench serial,mtp 256 low 3
+podman run ... ghcr.io/peonist-ai/halogen-flash-server:0.11.9 sweep -p 8192,32768 -n 128
 ```
 
 ---
@@ -943,7 +973,7 @@ podman run --rm -p 8731:8731 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -e HALOGEN_CHECKPOINT=/models/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
   -v ~/gguf-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.8
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.9
 ```
 
 Name any shard of a split; the siblings are found by name. With
@@ -994,8 +1024,10 @@ and no lossless repack avoids it. Prefill is compute-bound and does not care.
 its own quantized values moved into the affine planes the kernels take with
 nothing requantized, and measured against `UD-IQ4_XS` in the same session on
 the same machine, MTP on in both. It is 104 GiB on disk and holds about
-78 GiB in RAM, because its `Q4_K` / `Q5_K` dense rows carry more bits than
-`UD-IQ4_XS`'s. It is the more accurate of the two: perplexity 0.020 nats
+78 to 80 GiB in RAM (the engine's header estimate says 79.6), because its
+`Q4_K` / `Q5_K` dense rows carry more bits than `UD-IQ4_XS`'s; on a 122 GiB
+box that is the difference between fitting at `HALOGEN_MAX_TOK` 32768 and
+needing 16384 (issue #80). It is the more accurate of the two: perplexity 0.020 nats
 lower than `UD-IQ4_XS` over 32K tokens (0.033 lower than the engine's own
 checkpoint, which both GGUFs beat), and fixture agreement 31/32 and 32/32
 against transformers where `UD-IQ4_XS` scores 30 and 31. Prefill is the same
@@ -1587,6 +1619,48 @@ which gives back about 8.8 GiB (the startup line's working memory, 21.3 to
 section](#context-and-memory-one-kv-pool-several-conversations) has the
 measured table.
 
+A start that ends in `checkpoint: refusing to pin ... the floor is 16.00
+GiB` instead is the same arithmetic one step later: everything fit except
+the last pin, and finishing it would leave the host under 16 GiB, where the
+lookup table pages in from disk on every long prompt. Since 0.11.9 that line
+says how far short the configuration is and lists the levers in order;
+`HALOGEN_MAX_TOK=16384` is usually the one. A K-quant GGUF on a 122 GiB box
+is the case that found it (issue #80): the pool was already at one context,
+so the pool fit had nothing to lower, and the pre-flight estimate carried
+the smaller GGUF's weight size.
+
+### If the server hangs at "reserving the KV pool"
+
+A start that prints `reserving the KV pool` and then nothing for many
+minutes, with `still reserving` lines whose compaction counts climb and a
+process that `podman stop` cannot end, is not the out-of-memory case above.
+The pool lands in GTT, the driver's own window on system RAM, and a start
+that cannot place it there does not fail: it blocks inside the driver. On
+four hosts (issues #34 and #79, and our own gate machine) the cause was
+memory a previous GPU process's exit did not give back: a process ending
+while the GPU had work in flight (another model's exit, a watchdog kill
+under a memory stall, a `podman restart` mid-reservation, a cancelled
+request on a busy queue), after which 35 to 45 GiB of GTT stayed allocated
+with no process alive, on two of them with a kernel worker
+(`svm_range_restore_work`) in uninterruptible sleep. Since 0.11.9 the
+container reads the driver's counters before it starts and says so:
+
+```
+halogen: GTT in use before this start: 34.9 GiB of 120.0 (85.1 free; this start puts about 31.6 GiB there)
+halogen: WARNING 34.9 GiB of GTT is in use and no process holds the GPU, as far as this container can see
+```
+
+If that warning appears, check on the host (not in the container) that
+nothing holds the device, `fuser -v /dev/kfd`, and that the figure does not
+fall on its own, `cat /sys/class/drm/card*/device/mem_info_gtt_used`.
+Removing containers does not release it and neither does waiting; reboot the
+host before starting the server again. When the GTT is held by another
+process the line says that instead, and the server starts on what is left;
+when what is left is less than the pool needs, it refuses at once rather
+than blocking. What puts a host there is the kill, and since 0.11.9 the
+watchdog no longer kills an engine that is silent inside the kernel (see
+[Give it a machine of its own](#give-it-a-machine-of-its-own)).
+
 ### If the server starts but crawls on long prompts
 
 A server that starts, answers short prompts, and then collapses to a few
@@ -1706,23 +1780,35 @@ only that ours is what produced these numbers.
 The remaining three, `amdgpu.vm_update_mode=0`, `amdgpu.noretry=0` and
 `amdgpu.sg_display=0`, we have never run without. They are listed for
 completeness rather than recommended, and they are unmeasured in both
-directions: we make no claim about what they buy, and one report
-([#34](https://github.com/peonist-ai/halogen-flash-server/issues/34)) of an
-unkillable amdgpu deadlock came from a boot that had the first two set. One
-machine, one occurrence, not isolated to either flag, and none since on that
-machine without them. A second machine on the same issue, IOMMU off, ran the
-same workload with all three set and without: with them, 43 GiB of GTT stayed
-allocated after the container exited (`Trying to push to a killed entity` in
-dmesg) and every later start refused at the pin guard until a reboot; without
-them, GTT was back to 17 MiB within 5 s of every exit. Not isolated to one
-flag either. If you do not need them for something else, leave them off, and
-if a start refuses to pin right after a container exit, check
+directions: we make no claim about what they buy. Two reports
+([#34](https://github.com/peonist-ai/halogen-flash-server/issues/34)) of the
+driver keeping an engine's GPU memory after the process was gone came from
+boots with them set, and one A/B on one machine ran clean without them, so
+this section said for a week to leave them off. A third host
+([#79](https://github.com/peonist-ai/halogen-flash-server/issues/79)) then
+reached the same state with none of the three set, and our own gate machine
+reached it once with all of them, so the flags are not what decides it. What
+the four share is a process holding the GPU ending while the driver had work
+in flight: another model's exit, a bench's normal exit, a cancelled request
+on a busy queue, a watchdog kill under a memory stall. After it, 35 to 45
+GiB of GTT stays allocated with nothing alive (`Trying to push to a killed
+entity` in dmesg on two of them, a kernel worker in `svm_range_restore_work`
+in D on two), and every later start either refuses at the pin guard or hangs
+at `reserving the KV pool` until the host reboots. Nothing in user space
+releases it; `amdgpu_gpu_recover` through debugfs may, and we have not
+tried it. Since 0.11.9 the container reads the counters before it starts
+and names the state (the troubleshooting section above shows the lines),
+and its watchdog no longer kills an engine that is silent inside the
+kernel, which is where #79's two kills landed. The flags: leave them
+off unless something else needs them, and do not expect that to be what
+saves you. After any unclean exit, check
 
 ```
-cat /sys/class/drm/card0/device/mem_info_gtt_used
+cat /sys/class/drm/card*/device/mem_info_gtt_used
 ```
 
-before blaming the host's memory.
+before starting again; tens of GiB with no container running is the state
+above.
 
 Check what you are on with:
 

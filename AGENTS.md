@@ -39,7 +39,7 @@ podman run --rm -p 8731:8731 \
   --ipc=host --ulimit memlock=-1:-1 \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-flash-next \
   -v ~/halogen-models:/models \
-  ghcr.io/peonist-ai/halogen-flash-server:0.11.8
+  ghcr.io/peonist-ai/halogen-flash-server:0.11.9
 ```
 
 - On Docker, `--group-add keep-groups` is `--group-add video --group-add render`.
@@ -109,10 +109,12 @@ concurrency, prompt). Quote them with the number.
   whether images are accepted and why not), `version` for both containers,
   `engine.responds`, `busy`, `busy_for_s`, `in_flight`, `queued`.
 - **`GET /cache`**: hits and stores, `hit_rate` (requests) and
-  `token_hit_rate` (prompt tokens), and `pool`: `positions`, `used`,
+  `token_hit_rate` (prompt tokens), `dropped` (entries a follow-up dropped
+  to take its region over; not evictions), and `pool`: `positions`, `used`,
   `usage_ratio`, `busy_regions`, `held_regions` (a warm conversation between
   turns, not a full pool), `waiting_for_room`, `waiting_s`, `relocated`,
-  `cold_resorts`, `room_clamped`, `moved`.
+  `cold_resorts`, `room_clamped`, `moved`. During a long cold prefill it
+  answers the last counters it had, with `stale_s` set.
 - **`GET /metrics`**: Prometheus, in llama-server's metric names.
 - **Log lines worth a grep** during a problem: `flash_serve: req N prefill
   P/T tokens` and `req N generated K tokens` (a long turn's progress),
@@ -120,9 +122,19 @@ concurrency, prompt). Quote them with the number.
   had left with `max_tokens` clamped, a region moved), `lookup table:
   ... took N s` (the table paging in from disk), `client disconnected`, and
   the `serve_api:` line at the end of every request with its timings, the
-  cached share of the prompt, the prefill rate and the pool's occupancy
-  (`prompt 59498 (58013 cached, 97.5%), prefill 2.29s = 648 t/s | ... |
-  pool 412224/655360 63%`).
+  cached share of the prompt, the prefill rate (only over 2,048 or more
+  processed tokens; a warm follow-up says `(25 new)` instead, since a few
+  hundred tokens in a second is a chunk's fixed cost, not a speed) and the
+  pool's occupancy (`prompt 30828 (30803 cached, 99.9%), prefill 0.38s
+  (25 new) | ... | pool 30976/524288 6%`; the cold turn before it:
+  `prompt 30803, prefill 27.92s = 1103 t/s`).
+- **Host and driver state**, in the prologue and from the watchdog: `GTT in
+  use before this start: N GiB of M` (tens of GiB with a `WARNING ... no
+  process holds the GPU` line after it is memory the driver kept from a
+  previous engine; the host needs a reboot, issue #79), `not counted as a
+  wedge` (the engine silent inside the kernel: a memory stall on a shared
+  host, not a wedge; nothing is taken down), and `this is a wedge, not a
+  stall` (the container is going down so a restart policy can recover it).
 - A cancelled request is a closed connection; there is no cancel by id and
   no response store.
 
